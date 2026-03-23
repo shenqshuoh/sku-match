@@ -11,3 +11,9 @@ wheels/
 
 # Model weights (large files)
 *.pt
+
+# YOLO output directories
+runs/
+
+# Input images (large binary files)
+data/images/
