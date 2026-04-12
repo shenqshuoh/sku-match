@@ -6,7 +6,7 @@ from PIL import Image
 from ultralytics import YOLOE
 
 from src.embedder import DINOv2Embedder, DINOv2Variant
-from src.image_utils import isolate_object, save_crop
+from src.image_utils import isolate_object, save_crop, extract_binary_masks
 from src.indexer import SKUIndexer
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.classes.objects365_classes import OBJECTS365_CLASSES
@@ -116,13 +116,9 @@ class SKUMatcher:
                 continue
 
             detections = []
-            for i, box in enumerate(result.boxes):
+            binary_masks = extract_binary_masks(result)
+            for i, (box, mask) in enumerate(zip(result.boxes, binary_masks)):
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-                mask = None
-                if result.masks is not None:
-                    contour = result.masks.xy[i].astype(np.int32).reshape(-1, 1, 2)
-                    mask = contour
 
                 detections.append(
                     Detection(

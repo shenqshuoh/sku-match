@@ -5,7 +5,7 @@ from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.classes.objects365_classes import OBJECTS365_CLASSES
-from src.image_utils import process_detection_crops
+from src.image_utils import process_detection_crops, extract_binary_masks
 
 
 def detect(
@@ -47,7 +47,7 @@ def detect(
 
         if result.masks is not None:
             boxes = [box.xyxy[0].tolist() for box in result.boxes]
-            masks = [mask_xy.astype(int).reshape(-1, 1, 2) for mask_xy in result.masks.xy]
+            masks = extract_binary_masks(result)
             class_names = [BEVERAGE_CONTAINER_CLASSES[int(box.cls[0])] for box in result.boxes]
 
             process_detection_crops(

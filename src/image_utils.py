@@ -4,6 +4,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 
 
@@ -12,12 +13,12 @@ def isolate_object(
     mask: np.ndarray | None,
     other_masks: list[np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Isolate an object from the image using its mask.
+    """Isolate an object from the image using its binary mask.
 
     Args:
         img: Input image (H, W, 3)
-        mask: Object mask contour (N, 1, 2) or None
-        other_masks: List of other object masks to exclude
+        mask: Binary mask (H, W) with values 0 or 1/255, or None
+        other_masks: List of other binary masks to exclude
 
     Returns:
         Isolated object with black background
@@ -25,16 +26,22 @@ def isolate_object(
     if mask is None:
         return img
 
-    b_mask = np.zeros(img.shape[:2], np.uint8)
-    cv2.drawContours(b_mask, [mask], -1, 255, cv2.FILLED)
+    # Ensure mask is binary (0 or 255)
+    if mask.max() <= 1:
+        mask = (mask * 255).astype(np.uint8)
+    else:
+        mask = mask.astype(np.uint8)
 
+    # Exclude other masks if provided
     if other_masks:
-        other_mask = np.zeros(img.shape[:2], np.uint8)
+        other_mask = np.zeros_like(mask)
         for om in other_masks:
-            cv2.drawContours(other_mask, [om], -1, 255, cv2.FILLED)
-        b_mask = cv2.bitwise_and(b_mask, cv2.bitwise_not(other_mask))
+            if om.max() <= 1:
+                om = (om * 255).astype(np.uint8)
+            other_mask = cv2.bitwise_or(other_mask, om.astype(np.uint8))
+        mask = cv2.bitwise_and(mask, cv2.bitwise_not(other_mask))
 
-    mask3ch = cv2.cvtColor(b_mask, cv2.COLOR_GRAY2BGR)
+    mask3ch = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
     isolated = cv2.bitwise_and(mask3ch, img)
 
     return isolated
@@ -69,7 +76,7 @@ def process_detection_crops(
     Args:
         img: Original image (BGR from YOLOE)
         boxes: List of bounding boxes [(x1, y1, x2, y2), ...]
-        masks: List of mask contours or None
+        masks: List of binary masks (H, W) or None
         class_names: List of class names for each detection
         output_dir: Directory to save crops
         image_name: Base name of the image
@@ -101,3 +108,36 @@ def process_detection_crops(
             saved_paths.append(crop_path)
 
     return saved_paths
+
+
+def extract_binary_masks(result) -> list[np.ndarray | None]:
+    """Extract binary masks from YOLOE result.
+
+    Uses masks.data for full binary mask instead of masks.xy (simplified contour).
+    This ensures the complete instance is masked, not a smaller polygon approximation.
+
+    Args:
+        result: YOLOE prediction result
+
+    Returns:
+        List of binary masks (H, W) or None for each detection
+    """
+    if result.masks is None:
+        return [None] * len(result.boxes)
+
+    masks = []
+    img_h, img_w = result.orig_img.shape[:2]
+
+    for mask_tensor in result.masks.data:
+        # Convert tensor to numpy binary mask
+        mask = mask_tensor.cpu().numpy()
+
+        # Resize to original image dimensions if needed
+        if mask.shape != (img_h, img_w):
+            mask = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
+
+        # Ensure binary (0 or 1)
+        mask = (mask > 0.5).astype(np.uint8)
+        masks.append(mask)
+
+    return masks
