@@ -1,11 +1,18 @@
 [project]
 name = "beverage-cashier"
 version = "0.1.0"
-description = "YOLOv12 detection"
+description = "YOLOE detection with DINOv2 SKU matching"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "ultralytics>=8.3.0",
+    "clip @ git+https://github.com/openai/CLIP.git",
+    "coremltools>=9.0",
+    "numpy>=1.14.5,<=2.3.5",
+    "scikit-learn>=0.17,<=1.5.1",
+    "torch<=2.7.0",
+    "torchvision>=0.15.0",
+    "Pillow>=9.0.0",
 ]
 
 [project.optional-dependencies]
