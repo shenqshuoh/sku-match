@@ -93,17 +93,21 @@ def process_raw_references(
         if verbose:
             print(f"Processing {sku_dir.name}: {len(images)} images")
 
-        for idx, img_path in enumerate(sorted(images), 1):
-            if verbose:
-                print(f"  {img_path.name}...", end=" ")
-
-            result = model.predict(
-                source=str(img_path),
+        sorted_images = sorted(images)
+        if sorted_images:
+            results = model.predict(
+                source=[str(p) for p in sorted_images],
                 device=device,
                 conf=conf,
                 retina_masks=True,
                 verbose=False,
-            )[0]
+            )
+        else:
+            results = []
+
+        for idx, (img_path, result) in enumerate(zip(sorted_images, results), 1):
+            if verbose:
+                print(f"  {img_path.name}...", end=" ")
 
             if not result.boxes:
                 if verbose:

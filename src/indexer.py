@@ -23,6 +23,10 @@ class SKUIndexer:
         self._unique_skus = list(dict.fromkeys(self.sku_ids))
         self._embeddings_norm = None
         self._sku_mask = None
+        self._sku_indices = None
+        self._refs_per_sku = None
+        self._max_refs_per_sku = None
+        self._compute_sku_groups()
 
     def _get_normalized_embeddings(self) -> np.ndarray:
         if self._embeddings_norm is None:
@@ -39,6 +43,15 @@ class SKUIndexer:
             )
         return self._sku_mask
 
+    def _compute_sku_groups(self) -> None:
+        sku_to_idx = {sku: i for i, sku in enumerate(self._unique_skus)}
+        self._sku_indices = [[] for _ in range(len(self._unique_skus))]
+        for ref_idx, sku_id in enumerate(self.sku_ids):
+            self._sku_indices[sku_to_idx[sku_id]].append(ref_idx)
+        self._sku_indices = [np.array(idxs, dtype=np.int64) for idxs in self._sku_indices]
+        self._refs_per_sku = np.array([len(idxs) for idxs in self._sku_indices], dtype=np.int64)
+        self._max_refs_per_sku = int(self._refs_per_sku.max())
+
     def search(self, query_embedding: np.ndarray) -> tuple[str, float]:
         results = self.search_batch(query_embedding.reshape(1, -1))
         return results[0]
@@ -50,28 +63,32 @@ class SKUIndexer:
         embeddings_norm = self._get_normalized_embeddings()
         similarities = embeddings_norm @ query_embeddings.T
 
-        sku_mask = self._get_sku_mask()
         batch_size = query_embeddings.shape[0]
+        num_skus = len(self._unique_skus)
+        max_refs = self._max_refs_per_sku
 
-        results = []
-        for i in range(batch_size):
-            sims = similarities[:, i]
-            sim_matrix = sims[:, np.newaxis] * sku_mask
-            sim_matrix[~sku_mask] = -np.inf
+        padded_sims = np.full((num_skus, max_refs, batch_size), -np.inf, dtype=similarities.dtype)
+        for s, idxs in enumerate(self._sku_indices):
+            padded_sims[s, : len(idxs)] = similarities[idxs]
 
-            top2_sums = np.partition(sim_matrix, -2, axis=0)[-2:].sum(axis=0)
-            top2_sums = np.where((sku_mask.sum(axis=0) == 1), sim_matrix.max(axis=0), top2_sums)
+        top2 = np.partition(padded_sims, -2, axis=1)[:, -2:, :]
+        top2_sums = top2.sum(axis=1)
 
-            best_idx = int(np.argmax(top2_sums))
-            best_sku = self._unique_skus[best_idx]
-            best_score = float(top2_sums[best_idx])
+        if (self._refs_per_sku == 1).any():
+            max_sims = np.max(padded_sims, axis=1)
+            single_mask = self._refs_per_sku[:, None] == 1
+            top2_sums = np.where(single_mask, max_sims, top2_sums)
 
-            if best_score == -np.inf:
-                raise RuntimeError("No matches found")
+        best_indices = np.argmax(top2_sums, axis=0)
+        best_scores = top2_sums[best_indices, np.arange(batch_size)]
 
-            results.append((best_sku, best_score))
+        if np.any(best_scores == -np.inf):
+            raise RuntimeError("No matches found")
 
-        return results
+        return [
+            (self._unique_skus[int(idx)], float(score))
+            for idx, score in zip(best_indices, best_scores)
+        ]
 
     def save(self, directory: Path, model_name: str) -> None:
         if self.embeddings is None:
@@ -109,3 +126,7 @@ class SKUIndexer:
         self._unique_skus = list(dict.fromkeys(self.sku_ids))
         self._embeddings_norm = None
         self._sku_mask = None
+        self._sku_indices = None
+        self._refs_per_sku = None
+        self._max_refs_per_sku = None
+        self._compute_sku_groups()
