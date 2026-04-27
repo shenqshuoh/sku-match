@@ -3,7 +3,7 @@ name = "sku-match"
 version = "0.2.0"
 description = "YOLOE detection with DINOv2 SKU matching"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "ultralytics>=8.3.0",
     "chromadb>=1.5.0",
@@ -31,6 +31,15 @@ dev = [
 ]
 export = [
     "coremltools>=9.0",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cu124" },
+        { extra = "cu126" },
+        { extra = "cpu" },
+    ],
 ]
 
 [tool.ruff]
