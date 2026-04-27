@@ -1,16 +1,24 @@
+import gc
 from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 from ultralytics import YOLOE
 
 from src.embedder import DINOv2Embedder, DINOv2Variant
 from src.image_utils import isolate_object, save_crop, extract_binary_masks
-from src.indexer import SKUIndexer
+from src.indexer import SKUIndexer, _detect_device
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.classes.objects365_classes import OBJECTS365_CLASSES
 from src.types import Detection, SKUMatch
+
+
+def _free_gpu_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class SKUMatcher:
@@ -30,18 +38,18 @@ class SKUMatcher:
         self,
         image_paths: list[Path],
         output_dirs: list[Path] | None = None,
-        seg_batch: int = 4,
-        emb_batch: int = 16,
+        batch_size: int = 1,
     ) -> list[list[SKUMatch]]:
         all_results = []
 
-        for i in range(0, len(image_paths), seg_batch):
-            batch_paths = image_paths[i : i + seg_batch]
+        for i in range(0, len(image_paths), batch_size):
+            batch_paths = image_paths[i : i + batch_size]
             batch_dirs: list[Path | None] = (
-                list(output_dirs[i : i + seg_batch]) if output_dirs else [None] * len(batch_paths)
+                list(output_dirs[i : i + batch_size]) if output_dirs else [None] * len(batch_paths)
             )
-            batch_results = self._process_batch(batch_paths, batch_dirs, emb_batch)
+            batch_results = self._process_batch(batch_paths, batch_dirs)
             all_results.extend(batch_results)
+            _free_gpu_memory()
 
         return all_results
 
@@ -49,7 +57,6 @@ class SKUMatcher:
         self,
         image_paths: list[Path],
         output_dirs: list[Path | None],
-        emb_batch: int,
     ) -> list[list[SKUMatch]]:
         images = [Image.open(p).convert("RGB") for p in image_paths]
         img_arrays = [np.array(img) for img in images]
@@ -74,11 +81,7 @@ class SKUMatcher:
         if not all_crops:
             return [[] for _ in image_paths]
 
-        all_embeddings = []
-        for i in range(0, len(all_crops), emb_batch):
-            batch_crops = all_crops[i : i + emb_batch]
-            embeddings = self.embedder.embed_batch(batch_crops)
-            all_embeddings.extend(embeddings)
+        all_embeddings = self.embedder.embed_batch(all_crops)
 
         all_embeddings_arr = np.array(all_embeddings)
         all_matches = self.indexer.search_batch(all_embeddings_arr)
@@ -86,9 +89,11 @@ class SKUMatcher:
         results_by_image = [[] for _ in image_paths]
 
         for (img_idx, det, crop, img_path), (sku_id, score) in zip(crop_metadata, all_matches):
+            sku_name = self.indexer.get_sku_name(sku_id) or sku_id
             match = SKUMatch(
                 detection=det,
                 sku_id=sku_id,
+                sku_name=sku_name,
                 match_score=score,
             )
             results_by_image[img_idx].append(match)
@@ -139,9 +144,11 @@ class SKUMatcher:
         index_dir: Path,
         det_model: str = "models/yoloe-26l-seg.pt",
         emb_model: DINOv2Variant = "dinov2_vitb14",
-        device: str = "mps",
+        device: str | None = None,
         confidence_threshold: float = 1.2,
     ) -> "SKUMatcher":
+        if device is None:
+            device = _detect_device()
         embedder = DINOv2Embedder(model_name=emb_model, device=device)
         indexer = SKUIndexer()
         indexer.load(index_dir, emb_model)

@@ -1,24 +1,36 @@
 [project]
-name = "beverage-cashier"
-version = "0.1.0"
+name = "sku-match"
+version = "0.2.0"
 description = "YOLOE detection with DINOv2 SKU matching"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "ultralytics>=8.3.0",
-    "clip @ git+https://github.com/openai/CLIP.git",
-    "coremltools>=9.0",
+    "chromadb>=1.5.0",
     "numpy>=1.14.5,<=2.3.5",
-    "scikit-learn>=0.17,<=1.5.1",
-    "torch<=2.7.0",
-    "torchvision>=0.15.0",
     "Pillow>=9.0.0",
+    "opencv-python-headless>=4.5.0",
 ]
 
 [project.optional-dependencies]
+cu124 = [
+    "torch==2.6.0",
+    "torchvision==0.21.0",
+]
+cu126 = [
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+]
+cpu = [
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.3.0",
+]
+export = [
+    "coremltools>=9.0",
 ]
 
 [tool.ruff]

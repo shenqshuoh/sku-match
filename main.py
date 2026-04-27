@@ -28,7 +28,7 @@ def run_detection(args):
             device=args.device,
             conf=args.conf,
             imgsz=args.imgsz,
-            batch=args.batch,
+            batch_size=args.batch_size,
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -43,8 +43,7 @@ def run_matching(args):
     print(f"Loading index from: {args.index}")
     print(f"Detection model: {args.det_model}")
     print(f"Embedding model: {args.emb_model}")
-    print(f"Segmentation batch: {args.seg_batch}")
-    print(f"Embedding batch: {args.emb_batch}")
+    print(f"Batch size: {args.batch_size}")
 
     matcher = SKUMatcher.from_index_dir(
         index_dir=args.index,
@@ -75,8 +74,7 @@ def run_matching(args):
     all_results = matcher.match_images(
         image_paths=image_paths,
         output_dirs=output_dirs,
-        seg_batch=args.seg_batch,
-        emb_batch=args.emb_batch,
+        batch_size=args.batch_size,
     )
 
     for img_path, img_results in zip(image_paths, all_results):
@@ -105,6 +103,7 @@ def _save_image_results(
                 "class_id": match.detection.class_id,
                 "detection_conf": match.detection.confidence,
                 "sku_id": save_sku_id,
+                "sku_name": match.sku_name,
                 "match_score": match.match_score,
             }
         )
@@ -150,8 +149,8 @@ def main():
     )
     parser.add_argument(
         "--device",
-        default="mps",
-        help="Device: mps, cuda, cpu",
+        default=None,
+        help="Device: cuda, mps, cpu (default: auto-detect)",
     )
     parser.add_argument(
         "--conf",
@@ -162,32 +161,20 @@ def main():
     parser.add_argument(
         "--match-conf",
         type=float,
-        default=1.2,
+        default=1,
         help="Minimum match score for SKU assignment (default: 1.2)",
     )
     parser.add_argument(
         "--imgsz",
         type=int,
-        default=640,
+        default=1280,
         help="Input image size",
     )
     parser.add_argument(
-        "--batch",
+        "--batch-size",
         type=int,
-        default=1080,
-        help="Batch size",
-    )
-    parser.add_argument(
-        "--seg-batch",
-        type=int,
-        default=8,
-        help="YOLOE segmentation batch size (default: 16)",
-    )
-    parser.add_argument(
-        "--emb-batch",
-        type=int,
-        default=8,
-        help="DINOv2 embedding batch size (default: 16)",
+        default=1,
+        help="Unified batch size for detection and embedding (default: 1)",
     )
 
     args = parser.parse_args()
