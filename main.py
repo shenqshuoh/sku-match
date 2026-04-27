@@ -28,7 +28,7 @@ def run_detection(args):
             device=args.device,
             conf=args.conf,
             imgsz=args.imgsz,
-            batch_size=args.batch_size,
+            batch_size=args.batch,
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -43,7 +43,7 @@ def run_matching(args):
     print(f"Loading index from: {args.index}")
     print(f"Detection model: {args.det_model}")
     print(f"Embedding model: {args.emb_model}")
-    print(f"Batch size: {args.batch_size}")
+    print(f"Batch size: {args.batch}")
 
     matcher = SKUMatcher.from_index_dir(
         index_dir=args.index,
@@ -74,7 +74,7 @@ def run_matching(args):
     all_results = matcher.match_images(
         image_paths=image_paths,
         output_dirs=output_dirs,
-        batch_size=args.batch_size,
+        batch_size=args.batch,
     )
 
     for img_path, img_results in zip(image_paths, all_results):
@@ -171,10 +171,10 @@ def main():
         help="Input image size",
     )
     parser.add_argument(
-        "--batch-size",
+        "--batch",
         type=int,
         default=1,
-        help="Unified batch size for detection and embedding (default: 1)",
+        help="Batch size for detection and embedding (default: 1)",
     )
 
     args = parser.parse_args()
