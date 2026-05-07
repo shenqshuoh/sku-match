@@ -15,7 +15,14 @@ router = APIRouter()
 @router.post("/detect")
 async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depends(get_db)):
     try:
-        # 1. Log request to recognition_log table
+        # 1. Check for duplicate taskId
+        existing = await db.execute(
+            select(RecognitionLog).where(RecognitionLog.task_id == request.taskId)
+        )
+        if existing.scalar_one_or_none() is not None:
+            return ApiResponse(code=0, msg=f"taskId '{request.taskId}' already exists")
+
+        # 2. Log request to recognition_log table
         log = RecognitionLog(
             task_id=request.taskId,
             request_json=request.model_dump_json(),
@@ -23,16 +30,18 @@ async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depend
         db.add(log)
         await db.commit()
 
-        # 2. Download image via image storage
+        # 3. Download image via image storage
         downloaded_path = await req.app.state.image_storage.download_image(request.files)
 
-        # 3. Run recognition (CPU/GPU-bound, offload to thread)
-        result = await asyncio.to_thread(
+        # 4. Run recognition (CPU/GPU-bound, offload to dedicated inference thread)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            req.app.state.inference_executor,
             req.app.state.recognition_service.recognize,
-            image_path=downloaded_path,
-            task_id=request.taskId,
-            roi_rect=request.roiRect,
-            device=req.app.state.device,
+            downloaded_path,
+            request.taskId,
+            request.roiRect,
+            req.app.state.device,
         )
 
         # 4. Update log with result and visual image path

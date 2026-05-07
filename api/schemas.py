@@ -45,7 +45,7 @@ class SKUEnableRequest(BaseModel):
 
 class MediaItem(BaseModel):
     mediaId: str | None = None
-    mediaUrl: str
+    mediaUrl: str | None = None
 
 
 class SKUMediaRequest(BaseModel):
@@ -63,7 +63,7 @@ class DetectionItem(BaseModel):
     sku_id: str
     sku_name: str
     match_score: float
-    match_ratio: float = 0.0
+    match_concentration: float = 0.0
     sku_distribution: dict[str, float] | None = None
 
 
