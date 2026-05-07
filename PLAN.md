@@ -1,6 +1,6 @@
-# beverage-cashier API Server Implementation Plan
+# sku-match API Server Implementation Plan
 
-> **Status**: Planning phase — no implementation yet.  
+> **Status**: ✅ **IMPLEMENTED** — All phases (0–4) complete. API server is fully functional.  
 > **Target**: Linux server deployment.  
 > **Branch**: `api-server-plan`
 
@@ -10,13 +10,14 @@
 
 This project currently exists as a **local CLI tool** for bottle/can detection + DINOv2 SKU matching. The API.md spec defines a **production REST API** that wraps this pipeline into a multi-user web service with SKU management, recognition logging, and training lifecycle.
 
-### Current State (CLI)
+### Current State (CLI + API)
 
-- **Detection**: YOLOE with open-vocabulary detection (bottle, canned, carton, etc.)
-- **Matching**: DINOv2 embeddings + top-2 cosine similarity against reference index
-- **Index**: File-based (`embeddings_{model}.npy` + `metadata_{model}.json`) — manual numpy matrix operations
-- **Input**: Hardcoded `data/images/` directory
-- **Device**: Hardcoded to `mps` (Apple Silicon)
+- **Detection**: YOLOE with BEVERAGE_CONTAINER_CLASSES (7 items: Bottle, Canned, etc.)
+- **Matching**: DINOv2 embeddings + top-2 cosine similarity against Chroma vector store
+- **Index**: Chroma `PersistentClient` with HNSW cosine index — incremental add/delete, metadata filtering, persistent storage
+- **Input**: CLI uses `data/images/` directory; API accepts URL-based images from OSS
+- **Device**: Auto-detect via `detect_device()` (cuda → mps → cpu)
+- **API**: FastAPI server with 10 endpoints, SQLAlchemy async DB, async task runner
 
 ### Target State (API)
 
@@ -34,20 +35,20 @@ This project currently exists as a **local CLI tool** for bottle/can detection +
 
 These must happen before or alongside API work.
 
-| # | Issue | Fix | Priority |
-|---|-------|-----|----------|
-| F1 | `ssl._create_unverified_context` in `embedder.py:36` | Remove or guard with `sys.platform == "darwin"` | Critical |
-| F2 | Default device = `mps` everywhere | Auto-detect: `cuda → mps → cpu` | Critical |
-| F3 | `sku_name` missing from data model | Add to `SKUReference`, `SKUMatch`, indexer metadata | Critical |
-| F4 | No `itemId` per detection | Add sequential counter per request | High |
-| F5 | No ROI filtering in matcher | Add `roi` parameter to filter detections by bbox overlap | High |
-| F6 | No URL image loading | Add `ImageLoader` utility (local path + HTTP URL support) | High |
-| F7 | No annotated image generation | Add bbox + label drawing utility for `matched_image` | High |
-| F8 | `clip` dependency in `pyproject.toml` | Dead dependency — not imported anywhere. Remove. | Medium |
-| F9 | `coremltools` in main deps | Only needed for iOS export. Move to optional `[export]` group. | Medium |
-| F10 | `print()` statements everywhere | Replace with Python `logging` module | Medium |
-| F11 | `sys.path.insert(0, ...)` in scripts | Anti-pattern. Use proper package config. | Low |
-| F12 | File-based numpy index (`indexer.py`) | Replace with Chroma vector store (see Section 10) | Critical |
+| # | Issue | Fix | Priority | Status |
+|---|-------|-----|----------|--------|
+| F1 | `ssl._create_unverified_context` in `embedder.py:36` | Remove or guard with `sys.platform == "darwin"` | Critical | Kept (macOS compat) |
+| F2 | Default device = `mps` everywhere | Auto-detect: `cuda → mps → cpu` via `detect_device()` | Critical | ✅ Done |
+| F3 | `sku_name` missing from data model | Add to `SKUReference`, `SKUMatch`, indexer metadata | Critical | ✅ Done |
+| F4 | No `itemId` per detection | Add sequential counter per request | High | ✅ Done |
+| F5 | No ROI filtering in matcher | Add `roi` parameter to filter detections by bbox overlap | High | ✅ Done |
+| F6 | No URL image loading | Add `ImageLoader` utility (local path + HTTP URL support) | High | ✅ Done |
+| F7 | No annotated image generation | Add bbox + label drawing utility for `matched_image` | High | ✅ Done |
+| F8 | `clip` dependency in `pyproject.toml` | Dead dependency — not imported anywhere. Remove. | Medium | ✅ Done |
+| F9 | `coremltools` in main deps | Only needed for iOS export. Move to optional `[export]` group. | Medium | ✅ Done |
+| F10 | `print()` statements everywhere | Replace with Python `logging` module | Medium | ✅ Done |
+| F11 | `sys.path.insert(0, ...)` in scripts | Anti-pattern. Use proper package config. | Low | Open |
+| F12 | File-based numpy index (`indexer.py`) | Replace with Chroma vector store (see Section 10) | Critical | ✅ Done |
 
 ---
 
@@ -271,7 +272,7 @@ for crop_idx in range(len(results["ids"])):
         similarity = 2.0 - distance
         sku_scores.setdefault(sku_id, []).append(similarity)
     
-    # Sum top-2 per SKU (matches current algorithm)
+    # Sum top-2 per SKU → softmax probability distribution (current algorithm)
     best_sku, best_score = None, -1.0
     for sku_id, sims in sku_scores.items():
         top2 = sorted(sims, reverse=True)[:2]
@@ -281,6 +282,8 @@ for crop_idx in range(len(results["ids"])):
 ```
 
 > **Note**: This post-processing is lightweight (pure Python dict ops on ~50-200 results per crop). No measurable performance impact.
+
+> **Update**: The current implementation now applies **softmax normalization** to the top-2 scores, producing a probability distribution (0–1) over all enabled SKUs. The `match_conf` threshold operates on this probability (default 0.5). A `match_ratio` (top-1/top-2 probability ratio) is computed but disabled by default (threshold 0.0). Detection rank positions (`top2_ranks`) of the matched SKU's nearest vectors are tracked for diagnostics.
 
 #### 3.4 Background Task Runner
 
@@ -573,4 +576,52 @@ chroma_data/                          # Configured via CHROMA_PERSIST_DIR
 
 ---
 
-*Plan updated on 2026-04-23. Branch: `api-server-plan`. Chroma integration added.*
+## 11. Embedding Model Research & Upgrade Paths
+
+> Researched 2026-05-07. Current model: DINOv2 ViT-B/14 (768-dim).
+
+### 11.1 Current Model Assessment
+
+**DINOv2 ViT-B/14** is well-suited for SKU matching:
+- Self-supervised (no text bias) — learns purely visual features, ideal for distinguishing visually-similar packaging
+- Best speed/quality balance in the DINOv2 family
+- Oxford-H retrieval mAP: 49.5 (peaks at ViT-L/14 with 54.0)
+- iNaturalist fine-grained: 76.3%
+
+### 11.2 Alternative Models (Ranked for This Use Case)
+
+#### Tier 1: Drop-in Replacements (No Fine-Tuning)
+
+| Model | Emb. Dim | Params | Size (MB) | Pros | Cons |
+|-------|----------|--------|-----------|------|------|
+| **DINOv2 ViT-L/14** | 1024 | 300M | 1,189 | Best retrieval mAP (54.0) | 4× larger; slower; needs index rebuild |
+| **SigLIP ViT-SO400M/14** | 1152 | 428M | ~1,700 | Best CLIP accuracy/speed (82% zero-shot) | Text bias may group similar SKUs; 1152-dim |
+| **Marqo-Ecommerce-B** | 768 | 203M | ~800 | Pre-tuned on e-commerce; same 768-dim | Not beverage-specific |
+
+#### Tier 2: Domain Adaptation (Requires Fine-Tuning on SKU Data)
+
+| Approach | How | Effort | Expected Gain |
+|----------|-----|--------|---------------|
+| **DINOv2-B + ArcFace projection** (recommended) | Freeze DINOv2 backbone, train linear + ArcFace head on SKU pairs. Projects 768→256 dim. Pattern validated by Trendyol's DINOv2-Ecom model. | Medium — need labeled SKU image pairs | Better discrimination at smaller dim; marginal speed gain only from smaller vectors (ViT forward pass unchanged) |
+| **Fine-tune on beverage images** | LoRA or full fine-tune of DINOv2 on beverage container images | High | Significant for unusual packaging |
+
+**Note on ArcFace speed**: The ArcFace projection head (768→256 linear layer) adds negligible inference overhead. The ViT backbone forward pass — the actual bottleneck — remains identical. The speed improvement comes only from smaller embedding dimensions in vector search, which is negligible at current catalog scales (<10K vectors).
+
+#### Tier 3: Multi-Stage Pipeline (Large Catalogs)
+
+| Stage 1 (Coarse) | Stage 2 (Fine) | Use When |
+|-------------------|----------------|----------|
+| MobileCLIP-S2 (36M, 3.6ms) → top-50 | DINOv2-B/14 → re-rank | 1000+ SKUs |
+| SigLIP SO400M → top-30 | DINOv2-B/14 → re-rank | 500+ SKUs |
+
+### 11.3 Recommendation
+
+For current scale (<200 SKUs): **stay with DINOv2 ViT-B/14**. 
+
+When accuracy on visually-similar SKUs becomes a bottleneck: implement **DINOv2-B + ArcFace projection** (Tier 2). This is the highest-ROI upgrade — uses the existing backbone, requires only labeled SKU pairs (which the API collects via `/fix` corrections), and produces more discriminative embeddings.
+
+Model swapping (Tier 1) is lower effort but likely yields smaller improvements than domain adaptation.
+
+---
+
+*Plan updated on 2026-05-07. Embedding model research and upgrade paths added.*

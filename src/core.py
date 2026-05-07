@@ -1,20 +1,11 @@
-import gc
 import json
 from pathlib import Path
-
-import torch
 
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
-from src.classes.objects365_classes import OBJECTS365_CLASSES
 from src.image_utils import process_detection_crops, extract_binary_masks
-
-
-def _free_gpu_memory():
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+from src.utils import detect_device, free_gpu_memory
 
 
 def detect(
@@ -24,10 +15,8 @@ def detect(
     imgsz: int = 1280,
     batch_size: int = 1,
 ) -> None:
-    from src.indexer import _detect_device
-
     if device is None:
-        device = _detect_device()
+        device = detect_device()
 
     input_path = Path("data/images")
     if not input_path.exists():
@@ -54,7 +43,7 @@ def detect(
     crops_dir = output_dir / "crops"
 
     _save_result(first_result[0], output_dir, crops_dir)
-    _free_gpu_memory()
+    free_gpu_memory()
 
     for img_path in image_paths[1:]:
         results = model.predict(
@@ -68,7 +57,7 @@ def detect(
             retina_masks=True,
         )
         _save_result(results[0], output_dir, crops_dir)
-        _free_gpu_memory()
+        free_gpu_memory()
 
     print(f"Predictions saved to: {output_dir}")
 

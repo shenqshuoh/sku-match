@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clip"
+version = "1.0"
+description = "Contrastive Language-Image Pre-Training (vendored from ultralytics/CLIP)"
+requires-python = ">=3.7"
+dependencies = [
+    "ftfy",
+    "regex",
+    "torch",
+    "torchvision",
+]
+
+[tool.setuptools.packages.find]
+include = ["clip*"]
+
+[tool.setuptools.package-data]
+clip = ["*.txt.gz"]

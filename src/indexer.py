@@ -1,132 +1,276 @@
-import json
+"""Chroma-backed SKU index for DINOv2 embedding similarity search.
+
+Replaces the previous file-based numpy index (.npy + .json) with a Chroma
+PersistentClient using HNSW cosine distance. Supports incremental add/delete
+of reference embeddings without full index rebuilds.
+"""
+
+import logging
+import sys
 from pathlib import Path
 
+import chromadb
 import numpy as np
 
 from src.types import SKUReference
 
+EPSILON = 1e-8
+
+logger = logging.getLogger(__name__)
+
+COLLECTION_NAME = "sku_embeddings"
+
+# Chroma cosine distance: 0 = identical, 2 = opposite. Similarity = 2.0 - distance.
+COSINE_DISTANCE_TO_SIMILARITY = 2.0
+
+
+def _softmax(scores: dict[str, float], temperature: float = 0.5) -> dict[str, float]:
+    """Apply softmax to produce a probability distribution over SKUs."""
+    keys = list(scores.keys())
+    values = np.array([scores[k] for k in keys])
+    scaled = values / temperature
+    exp_values = np.exp(scaled - np.max(scaled))  # numerical stability
+    probs = exp_values / exp_values.sum()
+    return {k: float(p) for k, p in zip(keys, probs)}
+
 
 class SKUIndexer:
-    def __init__(self) -> None:
-        self.references: list[SKUReference] = []
-        self.embeddings: np.ndarray | None = None
-        self._embeddings_norm: np.ndarray | None = None
-        self.sku_ids: list[str] = []
-        self._unique_skus: list[str] = []
-        self._sku_mask: np.ndarray | None = None
-        self.model_name: str = ""
+    """SKU reference index backed by a Chroma vector store.
+
+    Each reference image is stored as a Chroma document with:
+      - id: "{sku_id}__{media_id}"
+      - embedding: DINOv2 vector (768-dim for vitb14)
+      - metadata: sku_id, sku_name, enabled, class_name, media_url
+    """
+
+    def __init__(
+        self,
+        collection: chromadb.Collection | None = None,
+        persist_dir: str | Path | None = None,
+        search_multiplier: int = 0.5,
+        temperature: float = 0.5,
+    ) -> None:
+        self._collection = collection
+        self._persist_dir = Path(persist_dir) if persist_dir else None
+        self._search_multiplier = search_multiplier
+        self._temperature = temperature
+        self._enabled_sku_count: int = 0
+        self._sku_name_cache: dict[str, str] = {}
+        self._cache_valid = False
+
+    @property
+    def collection(self) -> chromadb.Collection:
+        if self._collection is None:
+            raise RuntimeError("Index not initialised — call init_collection() or pass a collection")
+        return self._collection
+
+    def init_collection(self, persist_dir: str | Path | None = None) -> None:
+        if sys.platform == "darwin":
+            import ssl
+            ssl._create_default_https_context = ssl._create_unverified_context
+
+        dir_path = Path(persist_dir) if persist_dir else self._persist_dir or Path("chroma_data")
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+        client = chromadb.PersistentClient(
+            path=str(dir_path),
+            settings=chromadb.Settings(anonymized_telemetry=False),
+        )
+        self._collection = client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+        self._persist_dir = dir_path
+        self._refresh_cache()
+        logger.info(
+            "Chroma collection '%s' opened at %s (%d vectors)",
+            COLLECTION_NAME, dir_path, self._collection.count(),
+        )
 
     def build(self, references: list[SKUReference]) -> None:
-        self.references = references
-        self.embeddings = np.vstack([r.embedding for r in references])
-        self.sku_ids = [r.sku_id for r in references]
-        self._unique_skus = list(dict.fromkeys(self.sku_ids))
-        self._embeddings_norm = None
-        self._sku_mask = None
-        self._sku_indices = None
-        self._refs_per_sku = None
-        self._max_refs_per_sku = None
-        self._compute_sku_groups()
+        """Populate the Chroma collection from a list of SKUReference objects. Clears existing data first."""
+        if not references:
+            return
 
-    def _get_normalized_embeddings(self) -> np.ndarray:
-        if self._embeddings_norm is None:
-            embeddings = self.embeddings
-            if embeddings is None:
-                raise RuntimeError("Index not built")
-            self._embeddings_norm = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-        return self._embeddings_norm
+        existing = self.collection.get(include=[])
+        if existing["ids"]:
+            self.collection.delete(ids=existing["ids"])
 
-    def _get_sku_mask(self) -> np.ndarray:
-        if self._sku_mask is None:
-            self._sku_mask = np.array(
-                [[sku_id == u for u in self._unique_skus] for sku_id in self.sku_ids]
-            )
-        return self._sku_mask
+        ids: list[str] = []
+        embeddings: list[list[float]] = []
+        metadatas: list[dict] = []
 
-    def _compute_sku_groups(self) -> None:
-        sku_to_idx = {sku: i for i, sku in enumerate(self._unique_skus)}
-        self._sku_indices = [[] for _ in range(len(self._unique_skus))]
-        for ref_idx, sku_id in enumerate(self.sku_ids):
-            self._sku_indices[sku_to_idx[sku_id]].append(ref_idx)
-        self._sku_indices = [np.array(idxs, dtype=np.int64) for idxs in self._sku_indices]
-        self._refs_per_sku = np.array([len(idxs) for idxs in self._sku_indices], dtype=np.int64)
-        self._max_refs_per_sku = int(self._refs_per_sku.max())
+        for i, ref in enumerate(references):
+            doc_id = f"{ref.sku_id}__{i:04d}"
+            ids.append(doc_id)
+            embeddings.append(ref.embedding.tolist() if isinstance(ref.embedding, np.ndarray) else list(ref.embedding))
+            metadatas.append({
+                "sku_id": ref.sku_id,
+                "sku_name": ref.sku_name,
+                "enabled": True,
+                "image_path": str(ref.image_path),
+            })
 
-    def search(self, query_embedding: np.ndarray) -> tuple[str, float]:
+        self.collection.add(ids=ids, embeddings=embeddings, metadatas=metadatas)
+        self._refresh_cache()
+        logger.info("Built index: %d vectors, %d SKUs", len(ids), len({r.sku_id for r in references}))
+
+    def add_reference(
+        self,
+        sku_id: str,
+        sku_name: str,
+        media_id: str,
+        embedding: np.ndarray,
+        metadata: dict | None = None,
+    ) -> None:
+        doc_id = f"{sku_id}__{media_id}"
+        meta = {"sku_id": sku_id, "sku_name": sku_name, "enabled": True}
+        if metadata:
+            meta.update(metadata)
+
+        emb_list = embedding.tolist() if isinstance(embedding, np.ndarray) else list(embedding)
+        if isinstance(emb_list[0], list):
+            emb_list = emb_list[0]
+
+        self.collection.upsert(
+            ids=[doc_id],
+            embeddings=[emb_list],
+            metadatas=[meta],
+        )
+        self._cache_valid = False
+        logger.debug("Upserted reference %s", doc_id)
+
+    def delete_sku(self, sku_id: str) -> None:
+        self.collection.delete(where={"sku_id": sku_id})
+        self._cache_valid = False
+        logger.info("Deleted SKU %s from index", sku_id)
+
+    def delete_media(self, sku_id: str, media_id: str) -> None:
+        doc_id = f"{sku_id}__{media_id}"
+        self.collection.delete(ids=[doc_id])
+        self._cache_valid = False
+        logger.debug("Deleted reference %s", doc_id)
+
+    def set_enabled(self, sku_id: str, enabled: bool) -> None:
+        results = self.collection.get(where={"sku_id": sku_id}, include=["metadatas"])
+        if not results["ids"]:
+            logger.warning("SKU %s not found in index", sku_id)
+            return
+
+        updated_metas = [{**m, "enabled": enabled} for m in results["metadatas"]]
+        self.collection.update(ids=results["ids"], metadatas=updated_metas)
+        self._cache_valid = False
+        logger.info("Set SKU %s enabled=%s", sku_id, enabled)
+
+    def search(self, query_embedding: np.ndarray) -> tuple[dict[str, float], dict[str, list[int]]]:
         results = self.search_batch(query_embedding.reshape(1, -1))
         return results[0]
 
-    def search_batch(self, query_embeddings: np.ndarray) -> list[tuple[str, float]]:
-        if self.embeddings is None:
-            raise RuntimeError("Index not built")
+    def search_batch(
+        self, query_embeddings: np.ndarray
+    ) -> list[tuple[dict[str, float], dict[str, list[int]]]]:
+        """Match detection crops using top-2-per-SKU scoring with softmax normalization.
 
-        embeddings_norm = self._get_normalized_embeddings()
-        similarities = embeddings_norm @ query_embeddings.T
+        Algorithm: for each query, fetch top-N results from Chroma (cosine distance),
+        convert to similarity (2.0 - distance), group by sku_id, sum the top-2
+        similarities per SKU, then apply softmax to produce a probability distribution
+        over all enabled SKUs. Unranked SKUs receive a small epsilon score.
 
-        batch_size = query_embeddings.shape[0]
-        num_skus = len(self._unique_skus)
-        max_refs = self._max_refs_per_sku
+        Returns:
+            List of (distribution, rank_positions) tuples where:
+              - distribution: dict mapping sku_id → softmax probability (sums to 1.0)
+              - rank_positions: dict mapping sku_id → list of 1-indexed rank positions
+                of the SKU's top-2 vectors in the overall Chroma result list
+        """
+        if self.collection.count() == 0:
+            raise RuntimeError("Index is empty — no reference embeddings")
 
-        padded_sims = np.full((num_skus, max_refs, batch_size), -np.inf, dtype=similarities.dtype)
-        for s, idxs in enumerate(self._sku_indices):
-            padded_sims[s, : len(idxs)] = similarities[idxs]
+        if not self._cache_valid:
+            self._refresh_cache()
 
-        top2 = np.partition(padded_sims, -2, axis=1)[:, -2:, :]
-        top2_sums = top2.sum(axis=1)
+        all_enabled_skus = set(self._sku_name_cache.keys())
+        n_results = self._get_n_results_size()
 
-        if (self._refs_per_sku == 1).any():
-            max_sims = np.max(padded_sims, axis=1)
-            single_mask = self._refs_per_sku[:, None] == 1
-            top2_sums = np.where(single_mask, max_sims, top2_sums)
-
-        best_indices = np.argmax(top2_sums, axis=0)
-        best_scores = top2_sums[best_indices, np.arange(batch_size)]
-
-        if np.any(best_scores == -np.inf):
-            raise RuntimeError("No matches found")
-
-        return [
-            (self._unique_skus[int(idx)], float(score))
-            for idx, score in zip(best_indices, best_scores)
+        query_list = [
+            emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
+            for emb in query_embeddings
         ]
+
+        results = self.collection.query(
+            query_embeddings=query_list,
+            n_results=n_results,
+            where={"enabled": True},
+            include=["metadatas", "distances"],
+        )
+
+        matches: list[tuple[dict[str, float], dict[str, list[int]]]] = []
+
+        for crop_idx in range(len(query_list)):
+            sku_scores: dict[str, list[float]] = {}
+            sku_positions: dict[str, list[int]] = {}
+            metas = results["metadatas"][crop_idx]
+            dists = results["distances"][crop_idx]
+
+            for rank, (meta, distance) in enumerate(zip(metas, dists)):
+                similarity = COSINE_DISTANCE_TO_SIMILARITY - distance
+                sku_id = meta["sku_id"]
+                sku_scores.setdefault(sku_id, []).append(similarity)
+                sku_positions.setdefault(sku_id, []).append(rank + 1)  # 1-indexed
+
+            # Track top-2 rank positions per SKU
+            rank_info: dict[str, list[int]] = {}
+            for sku_id in all_enabled_skus:
+                if sku_id in sku_scores:
+                    # Sort by similarity desc, take top-2 positions
+                    scored = list(zip(sku_scores[sku_id], sku_positions[sku_id]))
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    rank_info[sku_id] = [pos for _, pos in scored[:2]]
+                else:
+                    rank_info[sku_id] = []
+
+            # Compute raw scores: top-2 sum for ranked SKUs, epsilon for unranked
+            raw_scores: dict[str, float] = {}
+            for sku_id in all_enabled_skus:
+                if sku_id in sku_scores:
+                    top2 = sorted(sku_scores[sku_id], reverse=True)[:2]
+                    raw_scores[sku_id] = top2[0] if len(top2) == 1 else sum(top2)
+                else:
+                    raw_scores[sku_id] = EPSILON
+
+            # Softmax normalization
+            probs = _softmax(raw_scores, self._temperature)
+            matches.append((probs, rank_info))
+
+        return matches
+
+    def get_sku_name(self, sku_id: str) -> str | None:
+        if not self._cache_valid:
+            self._refresh_cache()
+        return self._sku_name_cache.get(sku_id)
 
     def save(self, directory: Path, model_name: str) -> None:
-        if self.embeddings is None:
-            raise RuntimeError("Index not built")
-
-        directory.mkdir(parents=True, exist_ok=True)
-        self.model_name = model_name
-
-        np.save(directory / f"embeddings_{model_name}.npy", self.embeddings)
-
-        metadata = {
-            "model_name": model_name,
-            "sku_ids": self.sku_ids,
-            "image_paths": [str(r.image_path) for r in self.references],
-        }
-        with open(directory / f"metadata_{model_name}.json", "w") as f:
-            json.dump(metadata, f)
+        """No-op: Chroma auto-persists. Kept for CLI backward compat."""
 
     def load(self, directory: Path, model_name: str) -> None:
-        self.model_name = model_name
-        self.embeddings = np.load(directory / f"embeddings_{model_name}.npy")
+        self.init_collection(persist_dir=directory)
 
-        with open(directory / f"metadata_{model_name}.json") as f:
-            metadata = json.load(f)
+    def _get_n_results_size(self) -> int:
+        if not self._cache_valid:
+            self._refresh_cache()
+        return max(self._enabled_sku_count * self._search_multiplier, 20)
 
-        self.sku_ids = metadata["sku_ids"]
-        self.references = [
-            SKUReference(
-                sku_id=sku_id,
-                image_path=Path(path),
-                embedding=self.embeddings[i],
-            )
-            for i, (sku_id, path) in enumerate(zip(self.sku_ids, metadata["image_paths"]))
-        ]
-        self._unique_skus = list(dict.fromkeys(self.sku_ids))
-        self._embeddings_norm = None
-        self._sku_mask = None
-        self._sku_indices = None
-        self._refs_per_sku = None
-        self._max_refs_per_sku = None
-        self._compute_sku_groups()
+    def _refresh_cache(self) -> None:
+        if self._collection is None:
+            return
+
+        results = self.collection.get(where={"enabled": True}, include=["metadatas"])
+
+        sku_names: dict[str, str] = {}
+        for meta in results["metadatas"]:
+            sku_id = meta["sku_id"]
+            if sku_id not in sku_names:
+                sku_names[sku_id] = meta.get("sku_name", sku_id)
+
+        self._sku_name_cache = sku_names
+        self._enabled_sku_count = len(sku_names)
+        self._cache_valid = True

@@ -16,6 +16,7 @@ class Detection:
 @dataclass(frozen=True)
 class SKUReference:
     sku_id: str
+    sku_name: str
     image_path: Path
     embedding: np.ndarray
 
@@ -24,5 +25,9 @@ class SKUReference:
 class SKUMatch:
     detection: Detection
     sku_id: str
+    sku_name: str
     match_score: float
+    match_ratio: float = 0.0
+    top2_ranks: tuple[int, int] = (0, 0)
+    sku_distribution: dict[str, float] | None = None
     crop_path: Path | None = None

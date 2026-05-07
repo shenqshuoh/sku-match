@@ -1,5 +1,8 @@
 import ssl
 import warnings
+import sys
+import logging
+logger = logging.getLogger(__name__)
 from pathlib import Path
 from typing import Literal
 
@@ -27,13 +30,22 @@ class DINOv2Embedder:
         device: str | None = None,
     ):
         if device is None:
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            # Auto-detect device with a simple priority: CUDA > MPS > CPU
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
 
         self.model_name = model_name
         self.device = device
         self.dim = DIMENSIONS[model_name]
+        logger.info("DINOv2Embedder initialized: model=%s, device=%s, dim=%d", model_name, device, self.dim)
 
-        ssl._create_default_https_context = ssl._create_unverified_context
+        # macOS SSL handling: guard by platform to avoid global override on non-macOS
+        if sys.platform == "darwin":
+            ssl._create_default_https_context = ssl._create_unverified_context
         self.model = torch.hub.load(
             "facebookresearch/dinov2",
             model_name,

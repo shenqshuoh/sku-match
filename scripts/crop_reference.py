@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
-from src.classes.objects365_classes import OBJECTS365_CLASSES
+from src.utils import detect_device
 
 
 def select_center_detection(boxes: list, img_w: int, img_h: int) -> int | None:
@@ -65,11 +65,13 @@ def process_raw_references(
     raw_dir: Path,
     output_dir: Path,
     model_path: str = "models/yoloe-26l-seg.pt",
-    device: str = "mps",
+    device: str | None = None,
     conf: float = 0.25,
     use_mask: bool = False,
     verbose: bool = False,
 ) -> None:
+    if device is None:
+        device = detect_device()
     model = YOLOE(model_path)
     model.set_classes(BEVERAGE_CONTAINER_CLASSES)
 
@@ -149,7 +151,7 @@ def main():
     parser.add_argument("-r", "--raw-dir", type=Path, default="data/references_raw/")
     parser.add_argument("-o", "--output-dir", type=Path, default="data/references/")
     parser.add_argument("-m", "--model", type=str, default="models/yoloe-26l-seg.pt")
-    parser.add_argument("--device", default="mps")
+    parser.add_argument("--device", default=None)
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--mask", action="store_true", help="Apply segmentation masking")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")

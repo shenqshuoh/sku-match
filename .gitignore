@@ -17,3 +17,9 @@ runs/
 
 # Input images (large binary files)
 data/images/
+
+# Chroma persistence
+chroma_data/
+
+# Stale TorchScript files (but keep needed models in models/)
+/*.ts

@@ -1,0 +1,28 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    DATA_DIR: str = "data"
+    MODELS_DIR: str = "models"
+    CHROMA_PERSIST_DIR: str = "chroma_data"
+    RESULTS_DIR: str = "results"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./sku_match.db"
+
+    DET_MODEL: str = "models/yoloe-26l-seg.pt"
+    EMB_MODEL: str = "dinov2_vits14"
+    DEVICE: str | None = None
+
+    DET_CONF: float = 0.25
+    IMGSZ: int = 1280
+    MATCH_CONF: float = 0.5
+
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    DEBUG: bool = False
+
+    DOWNLOAD_TIMEOUT: int = 30
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+
+settings = Settings()

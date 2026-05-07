@@ -14,6 +14,7 @@ import argparse
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
+from src.utils import detect_device
 
 
 def export_yoloe_to_lvis(model_path: str):
@@ -25,7 +26,7 @@ def export_yoloe_to_lvis(model_path: str):
 
     model = YOLOE(model_path)
     model.set_classes(BEVERAGE_CONTAINER_CLASSES)
-    model.export(format="coreml", imgsz=1280, dynamic=True, batch=8, device="mps")
+    model.export(format="coreml", imgsz=1280, dynamic=True, batch=8, device=detect_device())
 
     return
 

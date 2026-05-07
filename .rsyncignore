@@ -1,0 +1,13 @@
+.venv/
+.git/
+__pycache__/
+runs/
+chroma_data/
+models/
+data/
+index/
+results/
+*.pyc
+.DS_Store
+*.egg-info/
+sku_match.db

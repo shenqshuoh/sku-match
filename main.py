@@ -2,13 +2,19 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from shutil import copy2
 
 from src.core import detect
 from src.matcher import SKUMatcher
+from src.reference_processor import ReferenceProcessor
 from src.types import SKUMatch
+from src.utils import configure_ultralytics_weights
+
+# Ensure ultralytics finds local model weights (mobileclip2_b.ts) without GitHub download
+configure_ultralytics_weights()
 
 
 def get_next_match_dir(base_dir: Path = Path("runs/match")) -> Path:
@@ -51,7 +57,31 @@ def run_matching(args):
         emb_model=args.emb_model,
         device=args.device,
         confidence_threshold=args.match_conf,
+        ratio_threshold=args.match_ratio,
+        det_conf=args.conf,
     )
+
+    # Auto-build index if empty (crop + embed from data/references/)
+    if matcher.indexer.collection.count() == 0:
+        ref_dir = Path("data/references")
+        if not ref_dir.exists() or not any(ref_dir.iterdir()):
+            print("Error: Index is empty and no reference images found in data/references/", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"\nIndex is empty — auto-building from {ref_dir} (crop + embed)...")
+        from src.utils import detect_device
+        device = args.device or detect_device()
+        processor = ReferenceProcessor(
+            detector=matcher.detector,
+            embedder=matcher.embedder,
+            indexer=matcher.indexer,
+            device=device,
+        )
+        count = processor.build_from_directory(ref_dir, batch_size=args.batch)
+        if count == 0:
+            print("Error: Failed to build index — no reference images processed", file=sys.stderr)
+            sys.exit(1)
+        print(f"Index built: {count} reference images\n")
 
     input_path = Path("data/images")
     if not input_path.exists():
@@ -71,18 +101,23 @@ def run_matching(args):
 
     print(f"\nProcessing {len(image_paths)} images...")
 
+    total_start = time.perf_counter()
+
     all_results = matcher.match_images(
         image_paths=image_paths,
         output_dirs=output_dirs,
         batch_size=args.batch,
+        verbose=args.match_verbose,
     )
 
-    for img_path, img_results in zip(image_paths, all_results):
+    for img_path, (img_results, elapsed) in zip(image_paths, all_results):
         img_dir = output_dir / img_path.stem
-        _save_image_results(img_path, img_dir, img_results, args.match_conf)
-        print(f"{img_path.name}: {len(img_results)} detections")
+        _save_image_results(img_path, img_dir, img_results, args.match_conf, args.match_ratio)
+        print(f"{img_path.name}: {len(img_results)} detections ({elapsed:.2f}s)")
 
+    total_elapsed = time.perf_counter() - total_start
     print(f"\nAll results saved to: {output_dir}")
+    print(f"Total time: {total_elapsed:.2f}s")
 
 
 def _save_image_results(
@@ -90,12 +125,14 @@ def _save_image_results(
     img_dir: Path,
     img_results: list[SKUMatch],
     match_conf: float,
+    match_ratio: float,
 ) -> None:
     save_results = []
     counts: dict[str, int] = {}
 
     for match in img_results:
-        save_sku_id = "unk" if match.match_score < match_conf else match.sku_id
+        is_match = match.match_score >= match_conf and match.match_ratio >= match_ratio
+        save_sku_id = match.sku_id if is_match else "unk"
         save_results.append(
             {
                 "bbox": match.detection.bbox,
@@ -105,6 +142,7 @@ def _save_image_results(
                 "sku_id": save_sku_id,
                 "sku_name": match.sku_name,
                 "match_score": match.match_score,
+                "match_ratio": match.match_ratio,
             }
         )
         counts[save_sku_id] = counts.get(save_sku_id, 0) + 1
@@ -144,8 +182,8 @@ def main():
         "--emb-model",
         type=str,
         choices=["dinov2_vits14", "dinov2_vitb14", "dinov2_vitl14"],
-        default="dinov2_vitb14",
-        help="DINOv2 embedding model variant (default: dinov2_vitb14)",
+        default="dinov2_vits14",
+        help="DINOv2 embedding model variant (default: dinov2_vits14)",
     )
     parser.add_argument(
         "--device",
@@ -161,8 +199,14 @@ def main():
     parser.add_argument(
         "--match-conf",
         type=float,
-        default=1,
-        help="Minimum match score for SKU assignment (default: 1.2)",
+        default=0.5,
+        help="Minimum match confidence (softmax probability) for SKU assignment (default: 0.5)",
+    )
+    parser.add_argument(
+        "--match-ratio",
+        type=float,
+        default=0.0,
+        help="Minimum top-1/top-2 probability ratio for confident match (default: 0.0, disabled)",
     )
     parser.add_argument(
         "--imgsz",
@@ -175,6 +219,11 @@ def main():
         type=int,
         default=1,
         help="Batch size for detection and embedding (default: 1)",
+    )
+    parser.add_argument(
+        "--match-verbose",
+        action="store_true",
+        help="Show per-image timing and match score distribution",
     )
 
     args = parser.parse_args()

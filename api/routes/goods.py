@@ -1,0 +1,187 @@
+import asyncio
+import json
+import uuid
+import logging
+from typing import List
+
+from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select, update, delete, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from api.database import get_db
+from api.models import SKU, SKUMedia, TrainJob
+from api.schemas import (
+    SKUNewRequest,
+    SKUUpdateRequest,
+    SKUDeleteRequest,
+    SKUEnableRequest,
+    SKUMediaRequest,
+    MediaItem,
+    ApiResponse,
+    SKUListData,
+    MediaResponse,
+    StatusResponse,
+)
+from api.tasks import start_embed_task
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.post("/sku/new")
+async def new_sku(request: SKUNewRequest, req: Request, db: AsyncSession = Depends(get_db)):
+    # 1. Insert SKU
+    sku = SKU(sku_id=request.skuId, sku_name=request.skuName, enabled=True, train_status="PENDING")
+    db.add(sku)
+    await db.commit()
+
+    # 2. Insert SKUMedia rows
+    media_urls: List[str] = []
+    media_ids: List[str] = []
+    for url in request.files:
+        media_id = uuid.uuid4().hex
+        media = SKUMedia(media_id=media_id, sku_id=request.skuId, media_url=url, media_type="IMAGE")
+        db.add(media)
+        media_urls.append(url)
+        media_ids.append(media_id)
+    await db.commit()
+
+    # 3. Create TrainJob
+    train_job = TrainJob(train_job_id=request.trainJobId, sku_id=request.skuId, status="pending", progress=0)
+    db.add(train_job)
+    await db.commit()
+
+    # 4. Start embedding task
+    sku_name = request.skuName
+    await start_embed_task(
+        train_job_id=request.trainJobId,
+        sku_id=request.skuId,
+        media_urls=media_urls,
+        media_ids=media_ids,
+        index_manager=req.app.state.index_manager,
+        image_storage=req.app.state.image_storage,
+        sku_name=sku_name,
+    )
+
+    # 5. Return identifiers
+    return ApiResponse(data={"skuId": request.skuId, "trainJobId": request.trainJobId})
+
+
+@router.post("/sku/update")
+async def update_sku(request: SKUUpdateRequest, req: Request, db: AsyncSession = Depends(get_db)):
+    # 1. Update SKU name
+    await db.execute(
+        update(SKU).where(SKU.sku_id == request.skuId).values(sku_name=request.skuName)
+    )
+    await db.commit()
+
+    # 2. Update Chroma metadata via index manager
+    if hasattr(req.app.state, "index_manager"):
+        await asyncio.to_thread(req.app.state.index_manager.update_sku_name, request.skuId, request.skuName)
+
+    return StatusResponse(status="success")
+
+
+@router.post("/sku/delete")
+async def delete_sku(request: SKUDeleteRequest, req: Request, db: AsyncSession = Depends(get_db)):
+    # 1. Delete SKU row (cascade deletes media)
+    sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
+    if sku is not None:
+        await db.execute(delete(SKU).where(SKU.sku_id == request.skuId))
+        await db.commit()
+
+    # 2. Remove references from Chroma
+    if hasattr(req.app.state, "index_manager"):
+        await asyncio.to_thread(req.app.state.index_manager.delete_sku_references, request.skuId)
+
+    return StatusResponse(status="success")
+
+
+@router.post("/sku/enable")
+async def enable_sku(request: SKUEnableRequest, req: Request, db: AsyncSession = Depends(get_db)):
+    # 1. Update enabled flag
+    await db.execute(
+        update(SKU).where(SKU.sku_id == request.skuId).values(enabled=request.enabled)
+    )
+    await db.commit()
+
+    # 2. Update Chroma
+    if hasattr(req.app.state, "index_manager"):
+        await asyncio.to_thread(req.app.state.index_manager.set_sku_enabled, request.skuId, request.enabled)
+
+    return StatusResponse(status="success")
+
+
+@router.get("/sku/list")
+async def list_skus(page: int = 1, size: int = 20, keyword: str | None = None, db: AsyncSession = Depends(get_db)):
+    offset = (page - 1) * size
+    kw = f"%{keyword}%" if keyword else None
+    base = select(SKU).options(selectinload(SKU.medias))
+    if kw:
+        base = base.where(or_(SKU.sku_id.ilike(kw), SKU.sku_name.ilike(kw)))
+    total_q = select(func.count(SKU.id))
+    if kw:
+        total_q = total_q.where(or_(SKU.sku_id.ilike(kw), SKU.sku_name.ilike(kw)))
+    total_res = await db.execute(total_q)
+    total = total_res.scalar_one()
+    result = await db.execute(base.offset(offset).limit(size))
+    skus = result.scalars().all()
+
+    data = SKUListData(
+        list=[
+            {
+                "id": s.id,
+                "skuId": s.sku_id,
+                "skuName": s.sku_name,
+                "trainStatus": s.train_status,
+                "medias": [
+                    {"mediaId": m.media_id, "mediaType": m.media_type, "mediaUrl": m.media_url}
+                    for m in s.medias
+                ],
+            }
+            for s in skus
+        ],
+        page=page,
+        pageSize=size,
+        total=total,
+    )
+
+    return ApiResponse(data=data)
+
+
+@router.post("/sku/media")
+async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession = Depends(get_db)):
+    if request.action == "add":
+        # add new media entries and embed references
+        sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
+        sku_name = sku.sku_name if sku else ""
+        for item in request.media:
+            if item.mediaId:
+                continue
+            media_id = uuid.uuid4().hex
+            media = SKUMedia(media_id=media_id, sku_id=request.skuId, media_url=item.mediaUrl, media_type="IMAGE")
+            db.add(media)
+            await db.commit()
+            downloaded_path = await req.app.state.image_storage.download_image(item.mediaUrl)
+            await asyncio.to_thread(
+                req.app.state.index_manager.embed_and_add_reference,
+                request.skuId,
+                sku_name,
+                media_id,
+                downloaded_path,
+            )
+        return StatusResponse(status="success")
+    elif request.action == "delete":
+        for item in request.media:
+            if not item.mediaId:
+                continue
+            await db.execute(delete(SKUMedia).where(SKUMedia.media_id == item.mediaId))
+            await db.commit()
+            await asyncio.to_thread(
+                req.app.state.index_manager.delete_media_reference,
+                request.skuId, item.mediaId,
+            )
+        return StatusResponse(status="success")
+    else:
+        return ApiResponse(code=0, msg="Unsupported action")

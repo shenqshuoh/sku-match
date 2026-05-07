@@ -141,3 +141,59 @@ def extract_binary_masks(result) -> list[np.ndarray | None]:
         masks.append(mask)
 
     return masks
+
+
+def draw_annotations(
+    image: np.ndarray,
+    detections: list[dict],
+    output_path: Path,
+) -> Path:
+    """Draw bounding boxes and SKU labels on image and save.
+
+    Args:
+        image: Original image as numpy array (RGB, HxWx3)
+        detections: List of dicts with keys: bbox (list[float]), sku_name (str), match_score (float)
+        output_path: Where to save the annotated image
+
+    Returns:
+        Path to the saved annotated image
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    annotated = image.copy()
+
+    for det in detections:
+        x1, y1, x2, y2 = map(int, det["bbox"])
+        sku_name = det.get("sku_name", "unknown")
+        score = det.get("match_score", 0.0)
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        label = f"{sku_name} ({score:.2f})"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.6
+        thickness = 1
+        (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+
+        cv2.rectangle(
+            annotated,
+            (x1, y1 - text_h - baseline - 6),
+            (x1 + text_w, y1),
+            (0, 255, 0),
+            -1,
+        )
+
+        cv2.putText(
+            annotated,
+            label,
+            (x1, y1 - baseline - 3),
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+        )
+
+    # Save as JPEG (convert RGB→BGR for OpenCV imwrite)
+    cv2.imwrite(str(output_path), cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR))
+    return output_path

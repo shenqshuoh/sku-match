@@ -12,17 +12,20 @@ BEVERAGE_CONTAINER_CLASSES = [
     "bottle",
     # Cans - aluminum/steel
     "canned",
-    # Box - paper/cardboard
-    "juice box",
+    # Paper carton & box - paper/cardboard
+    "carton",
+    # "paper box", # seperate from carton
+    "empty paper box",
+    "full paper box",
+    "strawed drink",
     # Large containers - kegs, barrels, jugs
     "keg",
-    "barrel",
-    "canteen",
-    "water jug",
+    # "jug",
     # Serving containers
-    "pitcher",
-    "teapot",
-    "coffeepot",
-    # Catch-all for other beverage containers
-    "beverage",
+    # "dish",
+    # "pitcher",
+    # "teapot",
+    # "coffeepot",
+    # # Catch-all for other beverage containers
+    # "beverage",
 ]
