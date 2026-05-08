@@ -283,7 +283,7 @@ for crop_idx in range(len(results["ids"])):
 
 > **Note**: This post-processing is lightweight (pure Python dict ops on ~50-200 results per crop). No measurable performance impact.
 
-> **Update**: The current implementation now applies **softmax normalization** to the top-2 scores, producing a probability distribution (0–1) over all enabled SKUs. The `match_conf` threshold operates on this probability (default 0.5). A `match_ratio` (top-1/top-2 probability ratio) is computed but disabled by default (threshold 0.0). Detection rank positions (`top2_ranks`) of the matched SKU's nearest vectors are tracked for diagnostics.
+> **Update (2026-05-08)**: The current implementation uses **softmax normalization** to produce a probability distribution (0–1) over all enabled SKUs. The `match_conf` threshold operates on this probability (default 0.5). **Concentration score** (top-1 share of top-K probability mass, default K=10) replaced the earlier match_ratio as the confidence signal. Detection rank positions (`top2_ranks`) of the matched SKU's nearest vectors are tracked for diagnostics. FP16 inference (`model.half()`) is enabled automatically when `device=="cuda"` for both YOLOE and DINOv2, giving ~1.8x speedup. Default embedding model changed to `dinov2_vits14` (384-dim) for better GPU memory fit.
 
 #### 3.4 Background Task Runner
 
@@ -415,11 +415,12 @@ Per requirements, these are noted but **not in this plan**:
 
 1. **Model loading time**: YOLOE + DINOv2 takes ~30-60s to load. Must happen at app startup, not per-request.
 2. **GPU memory**: DINOv2 vitl14 + YOLOE on a single GPU may OOM with concurrent requests. Batch processing within a single request is fine; multiple concurrent requests may need request queuing.
-3. **Chroma memory**: HNSW index resides in RAM. For 1000 SKUs × 5 images × 768-dim = ~15MB — negligible. Scales linearly; 10K vectors ≈ 30MB. Not a concern at projected scale.
-4. **Chroma persistence**: Uses SQLite under the hood. Must store on local SSD, **not network storage** (EFS/NFS causes SQLite corruption). For Docker: mount `/data` volume correctly.
-5. **Image download failures**: OSS URLs may be slow/unavailable. Add timeout and retry logic.
-6. **Chroma single-writer**: SQLite locks under concurrent writes. Acceptable for our use case (writes only happen during SKU CRUD, not during detection queries). Detection queries are read-only and don't contend.
-7. **Top-2 post-processing overhead**: Minimal — pure Python dict operations on ~50-200 results per crop. No measurable latency impact.
+3. **ONNX Runtime**: Not viable on 2GB GPU — lacks flash attention, materializes full attention matrix (687MB for batch=16). Available behind `--onnx` flag for future use with ≥4GB GPUs.
+4. **Chroma memory**: HNSW index resides in RAM. For 1000 SKUs × 5 images × 768-dim = ~15MB — negligible. Scales linearly; 10K vectors ≈ 30MB. Not a concern at projected scale.
+5. **Chroma persistence**: Uses SQLite under the hood. Must store on local SSD, **not network storage** (EFS/NFS causes SQLite corruption). For Docker: mount `/data` volume correctly.
+6. **Image download failures**: OSS URLs may be slow/unavailable. Add timeout and retry logic.
+7. **Chroma single-writer**: SQLite locks under concurrent writes. Acceptable for our use case (writes only happen during SKU CRUD, not during detection queries). Detection queries are read-only and don't contend.
+8. **Top-2 post-processing overhead**: Minimal — pure Python dict operations on ~50-200 results per crop. No measurable latency impact.
 
 ---
 
@@ -578,7 +579,7 @@ chroma_data/                          # Configured via CHROMA_PERSIST_DIR
 
 ## 11. Embedding Model Research & Upgrade Paths
 
-> Researched 2026-05-07. Current model: DINOv2 ViT-B/14 (768-dim).
+> Researched 2026-05-07. Default model changed to DINOv2 ViT-S/14 (384-dim) for 2GB GPU deployment. ViT-B/14 (768-dim) still supported.
 
 ### 11.1 Current Model Assessment
 
@@ -616,7 +617,7 @@ chroma_data/                          # Configured via CHROMA_PERSIST_DIR
 
 ### 11.3 Recommendation
 
-For current scale (<200 SKUs): **stay with DINOv2 ViT-B/14**. 
+For current scale (<200 SKUs) with 2GB GPU: **DINOv2 ViT-S/14** (384-dim, ~85MB) is the default for GPU memory constraints. ViT-B/14 remains the best choice when VRAM allows.
 
 When accuracy on visually-similar SKUs becomes a bottleneck: implement **DINOv2-B + ArcFace projection** (Tier 2). This is the highest-ROI upgrade — uses the existing backbone, requires only labeled SKU pairs (which the API collects via `/fix` corrections), and produces more discriminative embeddings.
 
@@ -624,4 +625,4 @@ Model swapping (Tier 1) is lower effort but likely yields smaller improvements t
 
 ---
 
-*Plan updated on 2026-05-07. Embedding model research and upgrade paths added.*
+*Plan updated on 2026-05-08. FP16 inference, concentration score, vits14 default, ONNX status updated.*

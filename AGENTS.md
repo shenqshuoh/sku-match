@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-05-07
+**Generated:** 2026-05-08
 **Project:** sku-match v0.2.0
 
 ## OVERVIEW
@@ -18,10 +18,11 @@ sku-match/
 ├── PLAN.md                   # API server implementation plan (COMPLETED)
 ├── CONSIDERATIONS.md         # Evaluated improvements (SAHI, FAISS, Qdrant, etc.)
 ├── CLEANUP_PLAN.md           # Cleanup progress tracker
+├── PERF_PLAN.md              # Performance improvement plan
 ├── src/
 │   ├── __init__.py           # Exports: detect, DINOv2Embedder, SKUIndexer, SKUMatcher, etc.
 │   ├── core.py               # CLI detection: detect(), _save_result()
-│   ├── embedder.py           # DINOv2Embedder: auto device detect, macOS SSL guard
+│   ├── embedder.py           # DINOv2Embedder: auto device detect, FP16 on CUDA, optional ONNX backend
 │   ├── indexer.py            # Chroma-backed SKUIndexer: build, add/delete/enable/search
 │   ├── matcher.py            # SKUMatcher: detection + SKU matching pipeline
 │   ├── types.py              # Dataclasses: Detection, SKUReference, SKUMatch
@@ -50,7 +51,8 @@ sku-match/
 │       └── image_storage.py  # ImageStorage: download (local/URL), get result path/URL
 ├── scripts/
 │   ├── build_index.py        # Build Chroma index from reference images
-│   └── crop_reference.py     # Crop raw refs with YOLOE
+│   ├── crop_reference.py     # Crop raw refs with YOLOE
+│   └── export_onnx.py        # Export DINOv2 to ONNX format
 ├── data/
 │   ├── images/               # Input images (CLI mode)
 │   ├── references/           # SKU reference images (sku_id/*.jpg)
@@ -72,7 +74,7 @@ sku-match/
 | API entry | api/app.py | FastAPI + lifespan, uvicorn server |
 | API config | api/config.py | pydantic-settings, .env file |
 | Detection logic | src/core.py | detect() function (CLI) |
-| DINOv2 embedder | src/embedder.py | 3 variants: vits14(384-dim), vitb14(768-dim), vitl14(1024-dim) |
+| DINOv2 embedder | src/embedder.py | 3 variants: vits14(384-dim), vitb14(768-dim), vitl14(1024-dim). Optional ONNX backend |
 | SKU indexer | src/indexer.py | Chroma-backed: search_batch with top-2-per-SKU scoring |
 | Detection + matching | src/matcher.py | SKUMatcher class with crop saving |
 | Reference processing | src/reference_processor.py | crop→embed→index pipeline, build_from_directory() |
@@ -85,6 +87,7 @@ sku-match/
 | API routes | api/routes/ | goods.py (SKU CRUD), recognition.py (detect/fix), logs.py, system.py |
 | ORM models | api/models.py | SKU, SKUMedia, RecognitionLog, TrainJob |
 | Pydantic schemas | api/schemas.py | Request/response models |
+| Performance plan | PERF_PLAN.md | GPU optimization tracking |
 
 ## CODE MAP
 
@@ -94,9 +97,10 @@ sku-match/
 | run_detection() | function | main.py | Detection-only mode (--detection-only) |
 | run_matching() | function | main.py | SKU matching mode (default) |
 | detect() | function | src/core.py | Core YOLO inference (CLI) |
-| DINOv2Embedder | class | src/embedder.py | DINOv2 embedding wrapper |
+| DINOv2Embedder | class | src/embedder.py | DINOv2 embedding wrapper (FP16 on CUDA, optional ONNX backend) |
 | DINOv2Variant | type | src/embedder.py | Literal type: vits14/vitb14/vitl14 |
 | SKUIndexer | class | src/indexer.py | Chroma-backed SKU index with top-2 scoring |
+| concentration_score | function | src/indexer.py | Top-1 share of top-K probability mass |
 | SKUMatcher | class | src/matcher.py | Detection + SKU matching with crop saving |
 | detect_device() | function | src/utils.py | Auto-detect: cuda → mps → cpu |
 | free_gpu_memory() | function | src/utils.py | Release cached GPU memory |
@@ -147,14 +151,17 @@ sku-match/
 - **API prefix**: `/api/v1/`
 - **Async pattern**: CPU-bound work runs via `asyncio.to_thread()` to avoid blocking event loop
 - **Crop naming**: `{image_name}_{index}_{sku_id}.jpg`
+- **FP16**: Both YOLOE and DINOv2 use `model.half()` at load time when device=cuda
+- **GPU concurrency**: API uses dedicated ThreadPoolExecutor(max_workers=1) for GPU inference
+- **Warm-up**: YOLOE warm-up prediction runs at API startup
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
 - **Hardcoded paths**: `data/images` path hardcoded in CLI
-- **sys.path hack**: tests/test_detection.py and scripts/ manipulate sys.path
+- **sys.path hack**: tests/test_detection.py, scripts/, and scripts/export_onnx.py manipulate sys.path
 - **No docstrings**: Minimal documentation
 - **No [project.scripts]**: pyproject.toml lacks console_scripts entry
-- **SSL override**: `ssl._create_default_https_context` disabled in embedder.py (macOS compat)
+- **SSL override**: `ssl._create_default_https_context` disabled in embedder.py (macOS compat, fallback path only)
 - **GFW vendor hacks**: clip vendored locally, mobileclip2_b.ts tracked in models/, aliyun PyPI mirror configured
 
 ## COMMANDS
@@ -167,10 +174,13 @@ source .venv/bin/activate
 python main.py
 
 # CLI: SKU matching with custom thresholds
-python main.py --conf 0.3 --match-conf 0.5 --match-ratio 0.0 --match-verbose
+python main.py --conf 0.3 --match-conf 0.5 --match-concentration 0.0 --match-verbose
 
 # CLI: Custom models
 python main.py --det-model models/yoloe-26l-seg.pt --emb-model dinov2_vitb14
+
+# CLI: FP16 + ONNX mode (GPU only)
+python main.py --swap --onnx
 
 # CLI: Detection only mode
 python main.py --detection-only
@@ -190,6 +200,9 @@ python scripts/build_index.py -r data/references/ -o index/ -m dinov2_vits14
 # Crop raw reference photos
 python scripts/crop_reference.py -r data/references_raw/ -o data/references/
 
+# Export DINOv2 to ONNX
+python scripts/export_onnx.py --model dinov2_vits14
+
 # Run smoke test
 python tests/test_detection.py
 ```
@@ -197,14 +210,18 @@ python tests/test_detection.py
 ## NOTES
 
 - **Default mode**: SKU matching (not detection-only)
-- **Embedding models**: dinov2_vits14 (384-dim), dinov2_vitb14 (768-dim, default), dinov2_vitl14 (1024-dim)
+- **Embedding models**: dinov2_vits14 (384-dim, default), dinov2_vitb14 (768-dim), dinov2_vitl14 (1024-dim)
 - **Chroma index**: PersistentClient with HNSW cosine similarity. Incremental add/delete — no full rebuild needed
-- **Match scoring**: Top-2-per-SKU cosine similarity sum → softmax probability distribution (0–1 range). Threshold default 0.5. Match ratio (top-1/top-2 prob ratio) disabled by default (0.0). Detection rank positions (top2_ranks) tracked per match.
+- **Match scoring**: Top-2-per-SKU cosine similarity sum → softmax probability distribution (0–1 range). Threshold default 0.5. Concentration score (top-1 share of top-K probability mass) replaces match_ratio. Detection rank positions (top2_ranks) tracked per match.
 - **Device auto-detect**: `detect_device()` returns cuda → mps → cpu
-- **SSL fix**: Disabled certificate verification for macOS compatibility
-- **First run**: Downloads YOLOE and DINOv2 models (~400MB)
+- **SSL fix**: Disabled certificate verification for macOS compatibility (fallback path only when local weights unavailable)
+- **First run**: Downloads YOLOE model (~400MB). DINOv2 weights vendored locally at models/*.pth (no download needed).
 - **API state**: Models loaded once at FastAPI lifespan startup, reused across requests
 - **ReferenceProcessor**: Unified crop→embed→index pipeline. Crops via YOLOE detection + mask isolation, falls back to full-image embedding. Used by both CLI auto-build and API index management.
-- **Detection confidence**: `--conf` flag (CLI) and `DET_CONF` setting (API) control YOLOE detection threshold. Passed to `predict(conf=)`.
+- **Detection confidence**: `--conf` flag (CLI) and `DET_CONF` setting (API) control YOLOE detection threshold. Passed to `predict(conf=)`. retina_masks=False to prevent OOM on high-res images.
 - **GFW compatibility**: `clip` vendored locally at `vendor/clip_package/`. `mobileclip2_b.ts` in `models/` avoids GitHub download. PyPI via aliyun mirror.
 - **Index operations**: All Chroma writes go through `IndexManager` (sync), called via `asyncio.to_thread()` in routes
+- **FP16 inference**: Both YOLOE and DINOv2 use model.half() at load time when device=cuda. ~1.8x speedup over FP32 on L20 GPU.
+- **ONNX backend**: Optional via --onnx flag / USE_ONNX setting. Export with scripts/export_onnx.py. Currently not viable on 2GB GPU (ONNX Runtime lacks flash attention).
+- **DINOv2 vendoring**: Full dinov2 source at vendor/dinov2/ + weights at models/dinov2_*_pretrain.pth. No internet needed at runtime.
+- **Performance**: See PERF_PLAN.md for optimization details. FP16 ~1.8x faster. GPU thread pool prevents OOM under concurrent load.

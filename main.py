@@ -42,9 +42,7 @@ def run_detection(args):
 
 
 def run_matching(args):
-    if not args.index.exists():
-        print(f"Error: Index directory not found: {args.index}", file=sys.stderr)
-        sys.exit(1)
+    args.index.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading index from: {args.index}")
     print(f"Detection model: {args.det_model}")
@@ -57,8 +55,11 @@ def run_matching(args):
         emb_model=args.emb_model,
         device=args.device,
         confidence_threshold=args.match_conf,
-        ratio_threshold=args.match_ratio,
+        concentration_threshold=args.match_concentration,
+        concentration_topk=args.match_concentration_topk,
         det_conf=args.conf,
+        swap_models=args.swap,
+        use_onnx=args.onnx,
     )
 
     # Auto-build index if empty (crop + embed from data/references/)
@@ -112,7 +113,7 @@ def run_matching(args):
 
     for img_path, (img_results, elapsed) in zip(image_paths, all_results):
         img_dir = output_dir / img_path.stem
-        _save_image_results(img_path, img_dir, img_results, args.match_conf, args.match_ratio)
+        _save_image_results(img_path, img_dir, img_results, args.match_conf, args.match_concentration)
         print(f"{img_path.name}: {len(img_results)} detections ({elapsed:.2f}s)")
 
     total_elapsed = time.perf_counter() - total_start
@@ -125,13 +126,13 @@ def _save_image_results(
     img_dir: Path,
     img_results: list[SKUMatch],
     match_conf: float,
-    match_ratio: float,
+    match_concentration: float,
 ) -> None:
     save_results = []
     counts: dict[str, int] = {}
 
     for match in img_results:
-        is_match = match.match_score >= match_conf and match.match_ratio >= match_ratio
+        is_match = match.match_score >= match_conf and match.match_concentration >= match_concentration
         save_sku_id = match.sku_id if is_match else "unk"
         save_results.append(
             {
@@ -142,7 +143,7 @@ def _save_image_results(
                 "sku_id": save_sku_id,
                 "sku_name": match.sku_name,
                 "match_score": match.match_score,
-                "match_ratio": match.match_ratio,
+                "match_concentration": match.match_concentration,
             }
         )
         counts[save_sku_id] = counts.get(save_sku_id, 0) + 1
@@ -203,10 +204,16 @@ def main():
         help="Minimum match confidence (softmax probability) for SKU assignment (default: 0.5)",
     )
     parser.add_argument(
-        "--match-ratio",
+        "--match-concentration",
         type=float,
         default=0.0,
-        help="Minimum top-1/top-2 probability ratio for confident match (default: 0.0, disabled)",
+        help="Minimum concentration score (top-1 share of top-K mass) for confident match (default: 0.0, disabled)",
+    )
+    parser.add_argument(
+        "--match-concentration-topk",
+        type=int,
+        default=10,
+        help="Number of top SKUs to consider for concentration score (default: 10)",
     )
     parser.add_argument(
         "--imgsz",
@@ -224,6 +231,17 @@ def main():
         "--match-verbose",
         action="store_true",
         help="Show per-image timing and match score distribution",
+    )
+    parser.add_argument(
+        "--swap",
+        action="store_true",
+        help="Enable model swapping: unload detector from GPU after detection, "
+        "then load embedder to GPU. Saves VRAM on low-memory GPUs (~2GB).",
+    )
+    parser.add_argument(
+        "--onnx",
+        action="store_true",
+        help="Use ONNX Runtime for DINOv2 embedding instead of PyTorch (requires .onnx model file).",
     )
 
     args = parser.parse_args()

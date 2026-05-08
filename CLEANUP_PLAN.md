@@ -151,17 +151,21 @@ Generated: 2026-05-07
 - `search_multiplier` param (default 1) replaces hardcoded multiplier  
 **Completed:** 2026-05-07
 
-### 9.3 [x] Add match ratio and detection confidence to matching
+### 9.3 [x] Add concentration score and detection confidence to matching
 **Priority:** HIGH  
-**Files:** `src/types.py`, `src/matcher.py`, `main.py`  
+**Files:** `src/types.py`, `src/matcher.py`, `src/indexer.py`, `main.py`, `api/schemas.py`, `api/services/recognition.py`, `api/config.py`, `api/app.py`  
 **Change:**
-- `SKUMatch.match_ratio`: top-1/top-2 probability ratio (disabled by default, threshold 0.0)
+- `SKUMatch.match_concentration`: top-1 share of top-K probability mass (replaces `match_ratio`)
+- `concentration_score()` function in `src/indexer.py`: `top_scores[0] / sum(top_scores[:top_k])`
+- `SKUMatcher.concentration_threshold`: gate for "unk" decision (default 0.0, disabled)
+- `SKUMatcher.concentration_topk`: K for concentration calculation (default 10)
 - `SKUMatch.top2_ranks`: 1-indexed rank positions of matched SKU's top-2 vectors in Chroma results
 - `SKUMatcher.det_conf`: detection confidence threshold passed to YOLOE `predict()`
 - `--conf` flag now works in matching mode (was only wired to detection-only mode)
-- `--match-ratio` CLI flag (default 0.0)
-- Verbose output: `detection n: conf=X.XX score=X.XXX ratio=X.XX, top 2 at (a, b)`  
-**Completed:** 2026-05-07
+- `--match-concentration` CLI flag (default 0.0), `--match-concentration-topk` (default 10)
+- API: `CONCENTRATION_TOPK: int = 10` setting
+- Verbose output: `detection n: conf=X.XX score=X.XXX conc=X.XX, top 2 at (a, b)`  
+**Completed:** 2026-05-08
 
 ### 9.4 [x] Embedding model research
 **Priority:** MEDIUM  
@@ -169,6 +173,70 @@ Generated: 2026-05-07
 **Key finding:** Current DINOv2 ViT-B/14 is already the best general-purpose choice. Highest-ROI upgrade is domain adaptation: freeze DINOv2 backbone + train ArcFace projection head (768→256 dim) on actual SKU data. The ViT forward pass (bottleneck) remains unchanged — speed gain is minimal, only from smaller vector dimensions in search.  
 **Noted in:** PLAN.md Section 11  
 **Completed:** 2026-05-07
+
+---
+
+## 10. Performance Optimizations
+
+### 10.1 [x] FP16 inference for YOLOE + DINOv2
+**Priority:** HIGH  
+**Files:** `src/embedder.py`, `src/matcher.py`, `api/app.py`  
+**Change:** `model.half()` at load time when `device=="cuda"`. Input tensors also half. ~1.8x speedup (5.79s vs 8.71s for 2 images).  
+**Completed:** 2026-05-08
+
+### 10.2 [x] Fix retina_masks OOM in API
+**Priority:** HIGH  
+**Files:** `api/services/recognition.py`  
+**Change:** `retina_masks=True` → `retina_masks=False`. Prevents 672MB allocation for full-res masks.  
+**Completed:** 2026-05-08
+
+### 10.3 [x] Dedicated GPU thread pool
+**Priority:** MEDIUM  
+**Files:** `api/routes/recognition.py`, `api/app.py`  
+**Change:** `ThreadPoolExecutor(max_workers=1)` for GPU inference. Prevents concurrent GPU access under load.  
+**Completed:** 2026-05-08
+
+### 10.4 [x] Pass numpy array to YOLOE
+**Priority:** MEDIUM  
+**Files:** `api/services/recognition.py`  
+**Change:** `source=image_np` instead of re-opening file. ~100ms saved per request.  
+**Completed:** 2026-05-08
+
+### 10.5 [x] Union mask O(D²)→O(D)
+**Priority:** MEDIUM  
+**Files:** `api/services/recognition.py`, `src/matcher.py`  
+**Change:** Pre-compute union of all masks once, per-detection exclusion = union - own_mask.  
+**Completed:** 2026-05-08
+
+### 10.6 [x] YOLOE warm-up on startup
+**Priority:** MEDIUM  
+**Files:** `api/app.py`  
+**Change:** Dummy predict on 640×640 zeros after set_classes(). Eliminates cold start.  
+**Completed:** 2026-05-08
+
+### 10.7 [x] ONNX Runtime (behind --onnx flag)
+**Priority:** MEDIUM  
+**Files:** `src/embedder.py`, `pyproject.toml`, `scripts/export_onnx.py` (new)  
+**Change:** Dual-mode embedder with `use_onnx: bool = False` param. Export script for DINOv2. NOT viable on 2GB GPU (ORT lacks flash attention → 687MB for batch=16). Future option for ≥4GB GPUs.  
+**Completed:** 2026-05-08
+
+### 10.8 [x] JPEG quality on annotated output
+**Priority:** LOW  
+**Files:** `src/image_utils.py`  
+**Change:** `cv2.imwrite()` with `[cv2.IMWRITE_JPEG_QUALITY, 85]`.  
+**Completed:** 2026-05-08
+
+### 10.9 [x] Default embedding model changed to vits14
+**Priority:** MEDIUM  
+**Files:** `api/config.py`, `main.py`  
+**Change:** Default `dinov2_vits14` (384-dim, ~85MB) instead of `dinov2_vitb14` (768-dim, ~330MB). Better fit for 2GB GPU alongside YOLOE.  
+**Completed:** 2026-05-08
+
+### 10.10 [x] DINOv2 vendoring for GFW
+**Priority:** HIGH  
+**Files:** `src/embedder.py`, `vendor/dinov2/` (new), `models/dinov2_*_pretrain.pth` (new)  
+**Change:** Full dinov2 source vendored at `vendor/dinov2/`. Weights at `models/dinov2_vits14_pretrain.pth` (84MB) and `models/dinov2_vitb14_pretrain.pth` (330MB). Embedder loads from local paths, falls back to internet if weight missing. No GitHub/fbpublicfiles download needed.  
+**Completed:** 2026-05-08
 
 ---
 
@@ -183,3 +251,5 @@ Generated: 2026-05-07
 | 2026-05-07 | **Vendored** `clip` to `vendor/clip_package/` — eliminates git dependency, GFW-safe |
 | 2026-05-07 | **Relocated** `mobileclip2_b.ts` to `models/`, added `configure_ultralytics_weights()` — avoids GitHub download at runtime |
 | 2026-05-07 | Completed items 9.1–9.4: ReferenceProcessor, softmax scoring, match ratio, det_conf, embedding model research |
+| 2026-05-08 | Completed items 10.1–10.10: FP16, retina_masks fix, GPU thread pool, numpy array, union mask, warm-up, ONNX (behind flag), JPEG quality, vits14 default, DINOv2 vendoring |
+| 2026-05-08 | Replaced match_ratio with concentration_score (item 9.3) |

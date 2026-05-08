@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     DET_CONF: float = 0.25
     IMGSZ: int = 1280
     MATCH_CONF: float = 0.5
+    CONCENTRATION_TOPK: int = 10
+    USE_ONNX: bool = False
 
     HOST: str = "0.0.0.0"
     PORT: int = 8000

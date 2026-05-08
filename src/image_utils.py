@@ -194,6 +194,6 @@ def draw_annotations(
             thickness,
         )
 
-    # Save as JPEG (convert RGB→BGR for OpenCV imwrite)
-    cv2.imwrite(str(output_path), cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR))
+    # Save as JPEG with quality 85 (convert RGB→BGR for OpenCV imwrite)
+    cv2.imwrite(str(output_path), cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
     return output_path

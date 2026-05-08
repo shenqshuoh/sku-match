@@ -1,3 +1,4 @@
+import concurrent.futures
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,9 +48,24 @@ async def lifespan(app: FastAPI):
     logger.info("Loading YOLOE detector: %s", settings.DET_MODEL)
     detector = YOLOE(settings.DET_MODEL)
     detector.set_classes(BEVERAGE_CONTAINER_CLASSES)
+    if device == "cuda":
+        import torch
+        detector.model.half()
+        logger.info("Detector converted to FP16")
 
-    logger.info("Loading DINOv2 embedder: %s", settings.EMB_MODEL)
-    embedder = DINOv2Embedder(model_name=cast(DINOv2Variant, settings.EMB_MODEL), device=device)
+    # Warm up detector: first CUDA call is slow due to lazy kernel initialization
+    logger.info("Warming up detector...")
+    import numpy as np
+    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+    detector.predict(source=dummy, retina_masks=False, verbose=False)
+    logger.info("Detector warm-up complete")
+
+    logger.info("Loading DINOv2 embedder: %s (onnx=%s)", settings.EMB_MODEL, settings.USE_ONNX)
+    embedder = DINOv2Embedder(
+        model_name=cast(DINOv2Variant, settings.EMB_MODEL),
+        device=device,
+        use_onnx=settings.USE_ONNX,
+    )
 
     # Init Chroma
     logger.info("Opening Chroma index: %s", settings.CHROMA_PERSIST_DIR)
@@ -79,7 +95,14 @@ async def lifespan(app: FastAPI):
         det_conf=settings.DET_CONF,
         imgsz=settings.IMGSZ,
         match_conf=settings.MATCH_CONF,
+        concentration_topk=settings.CONCENTRATION_TOPK,
     )
+
+    # Dedicated GPU inference executor — prevents concurrent GPU access under load
+    inference_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="gpu_inference"
+    )
+    app.state.inference_executor = inference_executor
 
     app.state.device = device
     app.state.detector = detector
@@ -95,6 +118,10 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down")
+    try:
+        inference_executor.shutdown(wait=False)
+    except Exception:
+        pass
     try:
         chroma_client.close()
     except Exception:

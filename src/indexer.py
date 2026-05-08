@@ -34,6 +34,17 @@ def _softmax(scores: dict[str, float], temperature: float = 0.5) -> dict[str, fl
     return {k: float(p) for k, p in zip(keys, probs)}
 
 
+def concentration_score(distribution: dict[str, float], top_k: int = 10) -> float:
+    """Fraction of top-K probability mass held by the #1 SKU.
+
+    Returns 0.0 when fewer than 2 SKUs compete or top-1 is zero.
+    """
+    top_scores = sorted(distribution.values(), reverse=True)[:top_k]
+    if len(top_scores) < 2 or top_scores[0] == 0:
+        return 0.0
+    return top_scores[0] / sum(top_scores)
+
+
 class SKUIndexer:
     """SKU reference index backed by a Chroma vector store.
 

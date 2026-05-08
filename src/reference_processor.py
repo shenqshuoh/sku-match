@@ -142,7 +142,7 @@ class ReferenceProcessor:
     def build_from_directory(
         self,
         reference_dir: Path,
-        batch_size: int = 16,
+        batch_size: int = 8,
     ) -> int:
         """Build the index from a directory of reference images (crop + embed).
 

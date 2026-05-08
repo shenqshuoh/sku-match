@@ -1,16 +1,21 @@
 from pathlib import Path
+import logging
 import time
 
 import numpy as np
+import cv2
+import torch
 from PIL import Image
 from ultralytics import YOLOE
 
 from src.embedder import DINOv2Embedder, DINOv2Variant
 from src.image_utils import isolate_object, save_crop, extract_binary_masks
-from src.indexer import SKUIndexer
+from src.indexer import SKUIndexer, concentration_score
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.types import Detection, SKUMatch
 from src.utils import detect_device, free_gpu_memory
+
+logger = logging.getLogger(__name__)
 
 
 class SKUMatcher:
@@ -20,15 +25,20 @@ class SKUMatcher:
         embedder: DINOv2Embedder,
         detector: YOLOE,
         confidence_threshold: float = 0.5,
-        ratio_threshold: float = 0.0,
+        concentration_threshold: float = 0.0,
+        concentration_topk: int = 10,
         det_conf: float = 0.25,
+        swap_models: bool = False,
     ):
         self.indexer = indexer
         self.embedder = embedder
         self.detector = detector
         self.confidence_threshold = confidence_threshold
-        self.ratio_threshold = ratio_threshold
+        self.concentration_threshold = concentration_threshold
+        self.concentration_topk = concentration_topk
         self.det_conf = det_conf
+        self.swap_models = swap_models
+        self._device = embedder.device
 
     def match_images(
         self,
@@ -46,6 +56,17 @@ class SKUMatcher:
 
         # Phase 1: Batch detection
         all_detections = self._detect_all(image_paths, batch_size)
+
+        if self.swap_models and self._device != "cpu":
+            # Unload detector from GPU, move embedder to GPU
+            logger.info("Swapping: unloading detector, loading embedder to GPU")
+            self.detector.model.cpu()
+            del self.detector
+            torch.cuda.empty_cache()
+            if self.embedder.model is not None:
+                self.embedder.model.to(self._device)
+            self.embedder.device = self._device
+
         free_gpu_memory()
 
         # Phase 2: Per-image embed + search
@@ -58,19 +79,34 @@ class SKUMatcher:
                 all_results[img_idx] = ([], 0.0)
                 continue
 
-            # Crop detections
+            # Pre-compute union of all masks for O(D) instead of O(D²) masking
             all_masks = [d.mask for d in detections if d.mask is not None]
+            union_mask = None
+            if all_masks:
+                first_valid = all_masks[0]
+                union_mask = np.zeros_like(first_valid, dtype=np.uint8)
+                for m in all_masks:
+                    m_uint8 = (m * 255).astype(np.uint8) if m.max() <= 1 else m.astype(np.uint8)
+                    union_mask = cv2.bitwise_or(union_mask, m_uint8)
+
             crops = []
             for det in detections:
                 x1, y1, x2, y2 = map(int, det.bbox)
-                other_masks = [m for m in all_masks if m is not det.mask]
-                isolated = isolate_object(img_array, det.mask, other_masks)
+                # Exclusion = union minus own mask
+                exclusion = None
+                if union_mask is not None and det.mask is not None:
+                    own_uint8 = (det.mask * 255).astype(np.uint8) if det.mask.max() <= 1 else det.mask.astype(np.uint8)
+                    exclusion = cv2.bitwise_and(union_mask, cv2.bitwise_not(own_uint8))
+                isolated = isolate_object(img_array, det.mask, [exclusion] if exclusion is not None else None)
                 crop = Image.fromarray(isolated[y1:y2, x1:x2])
                 crops.append(crop)
 
-            # Embed + search (batched within this image's crops)
-            embeddings = self.embedder.embed_batch(crops)
-            embeddings_arr = np.array(embeddings)
+            # Embed + search (chunked to avoid GPU OOM on low-VRAM devices)
+            _chunk = 16
+            all_embeddings: list[np.ndarray] = []
+            for ci in range(0, len(crops), _chunk):
+                all_embeddings.append(self.embedder.embed_batch(crops[ci : ci + _chunk]))
+            embeddings_arr = np.concatenate(all_embeddings, axis=0) if all_embeddings else np.empty((0, self.embedder.dim))
             search_results = self.indexer.search_batch(embeddings_arr)
 
             # Build results
@@ -80,8 +116,8 @@ class SKUMatcher:
                 ranked = sorted(distribution.items(), key=lambda x: x[1], reverse=True)
                 sku_id, confidence = ranked[0]
                 sku_name = self.indexer.get_sku_name(sku_id) or sku_id
-                # Confidence ratio: top-1 / top-2 (0.0 if only 1 SKU)
-                match_ratio = confidence / ranked[1][1] if len(ranked) > 1 and ranked[1][1] > 0 else 0.0
+                # Concentration: fraction of top-10 probability mass held by #1 SKU
+                match_concentration = concentration_score(distribution, top_k=self.concentration_topk)
                 # Rank positions of top-2 vectors for matched SKU
                 positions = rank_info.get(sku_id, [])
                 top2_ranks = (positions[0], positions[1]) if len(positions) >= 2 else (positions[0], 0) if len(positions) == 1 else (0, 0)
@@ -90,7 +126,7 @@ class SKUMatcher:
                     sku_id=sku_id,
                     sku_name=sku_name,
                     match_score=confidence,
-                    match_ratio=match_ratio,
+                    match_concentration=match_concentration,
                     top2_ranks=top2_ranks,
                     sku_distribution=distribution,
                 )
@@ -98,7 +134,7 @@ class SKUMatcher:
 
                 if output_dir:
                     output_dir.mkdir(parents=True, exist_ok=True)
-                    is_match = confidence >= self.confidence_threshold and match_ratio >= self.ratio_threshold
+                    is_match = confidence >= self.confidence_threshold and match_concentration >= self.concentration_threshold
                     save_sku = sku_id if is_match else "unk"
                     crop_idx = len(results)
                     save_crop(crop, f"{img_path.stem}_{crop_idx:03d}_{save_sku}.jpg", output_dir)
@@ -123,7 +159,7 @@ class SKUMatcher:
             batch_paths = image_paths[i : i + batch_size]
             results = self.detector.predict(
                 source=[str(p) for p in batch_paths],
-                retina_masks=True,
+                retina_masks=False,
                 verbose=False,
                 conf=self.det_conf,
             )
@@ -161,7 +197,7 @@ class SKUMatcher:
             top = ranked[:10]
             labels = "  ".join(f"{sku:>6s}" for sku, _ in top)
             probs = "  ".join(f"{p:>6.3f}" for _, p in top)
-            print(f"    detection {i}: conf={match.detection.confidence:.2f} score={match.match_score:.3f} ratio={match.match_ratio:.2f}, top 2 at {match.top2_ranks}")
+            print(f"    detection {i}: conf={match.detection.confidence:.2f} score={match.match_score:.3f} conc={match.match_concentration:.3f}, top 2 at {match.top2_ranks}")
             print(f"      {labels}")
             print(f"      {probs}")
 
@@ -173,23 +209,36 @@ class SKUMatcher:
         emb_model: DINOv2Variant = "dinov2_vitb14",
         device: str | None = None,
         confidence_threshold: float = 0.5,
-        ratio_threshold: float = 0.0,
+        concentration_threshold: float = 0.0,
+        concentration_topk: int = 10,
         det_conf: float = 0.25,
+        swap_models: bool = False,
+        use_onnx: bool = False,
     ) -> "SKUMatcher":
         if device is None:
             device = detect_device()
-        embedder = DINOv2Embedder(model_name=emb_model, device=device)
+
+        # When swap is enabled, load embedder on CPU first — moved to GPU after detection
+        emb_device = "cpu" if swap_models and device != "cpu" else device
+        embedder = DINOv2Embedder(model_name=emb_model, device=emb_device, use_onnx=use_onnx)
         indexer = SKUIndexer()
         indexer.load(index_dir, emb_model)
 
         detector = YOLOE(det_model)
         detector.set_classes(BEVERAGE_CONTAINER_CLASSES)
+        if device == "cuda":
+            detector.model.half()
 
-        return cls(
+        instance = cls(
             indexer=indexer,
             embedder=embedder,
             detector=detector,
             confidence_threshold=confidence_threshold,
-            ratio_threshold=ratio_threshold,
+            concentration_threshold=concentration_threshold,
+            concentration_topk=concentration_topk,
             det_conf=det_conf,
+            swap_models=swap_models,
         )
+        # Store target device (not initial device, which may be CPU for swap)
+        instance._device = device
+        return instance
