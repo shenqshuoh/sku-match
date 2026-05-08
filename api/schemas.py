@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class DetectRequest(BaseModel):
@@ -8,6 +8,13 @@ class DetectRequest(BaseModel):
     mode: str = "IMAGE"
     files: str
     roiRect: list[float] | None = None
+
+    @field_validator("roiRect")
+    @classmethod
+    def validate_roi_rect(cls, v):
+        if v is not None and len(v) != 4:
+            raise ValueError("roiRect must have exactly 4 elements [x1, y1, x2, y2]")
+        return v
 
 
 class FixItem(BaseModel):

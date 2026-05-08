@@ -31,7 +31,15 @@ router = APIRouter()
 
 @router.post("/sku/new")
 async def new_sku(request: SKUNewRequest, req: Request, db: AsyncSession = Depends(get_db)):
-    # 1. Insert SKU
+    # 1. Check for duplicate skuId and trainJobId
+    existing_sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
+    if existing_sku is not None:
+        return ApiResponse(code=0, msg=f"skuId '{request.skuId}' already exists")
+    existing_job = await db.scalar(select(TrainJob).where(TrainJob.train_job_id == request.trainJobId))
+    if existing_job is not None:
+        return ApiResponse(code=0, msg=f"trainJobId '{request.trainJobId}' already exists")
+
+    # 2. Insert SKU
     sku = SKU(sku_id=request.skuId, sku_name=request.skuName, enabled=True, train_status="PENDING")
     db.add(sku)
     await db.commit()
@@ -70,13 +78,18 @@ async def new_sku(request: SKUNewRequest, req: Request, db: AsyncSession = Depen
 
 @router.post("/sku/update")
 async def update_sku(request: SKUUpdateRequest, req: Request, db: AsyncSession = Depends(get_db)):
-    # 1. Update SKU name
+    # 1. Check SKU exists
+    sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
+    if sku is None:
+        return ApiResponse(code=0, msg=f"skuId '{request.skuId}' not found")
+
+    # 2. Update SKU name
     await db.execute(
         update(SKU).where(SKU.sku_id == request.skuId).values(sku_name=request.skuName)
     )
     await db.commit()
 
-    # 2. Update Chroma metadata via index manager
+    # 3. Update Chroma metadata via index manager
     if hasattr(req.app.state, "index_manager"):
         await asyncio.to_thread(req.app.state.index_manager.update_sku_name, request.skuId, request.skuName)
 
@@ -100,13 +113,18 @@ async def delete_sku(request: SKUDeleteRequest, req: Request, db: AsyncSession =
 
 @router.post("/sku/enable")
 async def enable_sku(request: SKUEnableRequest, req: Request, db: AsyncSession = Depends(get_db)):
-    # 1. Update enabled flag
+    # 1. Check SKU exists
+    sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
+    if sku is None:
+        return ApiResponse(code=0, msg=f"skuId '{request.skuId}' not found")
+
+    # 2. Update enabled flag
     await db.execute(
         update(SKU).where(SKU.sku_id == request.skuId).values(enabled=request.enabled)
     )
     await db.commit()
 
-    # 2. Update Chroma
+    # 3. Update Chroma
     if hasattr(req.app.state, "index_manager"):
         await asyncio.to_thread(req.app.state.index_manager.set_sku_enabled, request.skuId, request.enabled)
 
@@ -157,9 +175,11 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
         for item in request.media:
             if not item.mediaUrl:
                 return ApiResponse(code=0, msg="mediaUrl is required for add action")
-        # add new media entries and embed references
+        # 2. Check SKU exists
         sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
-        sku_name = sku.sku_name if sku else ""
+        if sku is None:
+            return ApiResponse(code=0, msg=f"skuId '{request.skuId}' not found")
+        sku_name = sku.sku_name
         for item in request.media:
             if item.mediaId:
                 continue
