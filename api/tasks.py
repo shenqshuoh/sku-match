@@ -28,7 +28,7 @@ async def start_embed_task(
                 )
                 tj = result.scalar_one_or_none()
                 if tj is not None:
-                    tj.status = "training"
+                    tj.status = "indexing"  # Not model training — building vector index from reference images
                     await session.commit()
 
             for idx, (url, media_id) in enumerate(zip(media_urls, media_ids), start=1):
@@ -60,10 +60,10 @@ async def start_embed_task(
                 )
                 await session.commit()
 
-            logger.info("Embedding task completed: train_job_id=%s", train_job_id)
+            logger.info("Indexing task completed: train_job_id=%s", train_job_id)
 
         except Exception:
-            logger.exception("Embedding task failed: train_job_id=%s", train_job_id)
+            logger.exception("Indexing task failed: train_job_id=%s", train_job_id)
             async with async_session() as session:
                 await session.execute(
                     update(TrainJob)

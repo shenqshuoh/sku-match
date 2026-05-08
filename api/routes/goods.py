@@ -153,6 +153,10 @@ async def list_skus(page: int = 1, size: int = 20, keyword: str | None = None, d
 @router.post("/sku/media")
 async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession = Depends(get_db)):
     if request.action == "add":
+        # Validate: mediaUrl is required for add action
+        for item in request.media:
+            if not item.mediaUrl:
+                return ApiResponse(code=0, msg="mediaUrl is required for add action")
         # add new media entries and embed references
         sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
         sku_name = sku.sku_name if sku else ""

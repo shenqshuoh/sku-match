@@ -44,12 +44,12 @@ async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depend
             req.app.state.device,
         )
 
-        # 4. Update log with result and visual image path
+        # 5. Update log with result and visual image path
         log.ai_result_json = json.dumps(result)
         log.visual_image_path = result.get("matched_image") if isinstance(result, dict) else None
         await db.commit()
 
-        # 5. Return response
+        # 6. Return response
         return ApiResponse(data=result)
     except Exception as e:
         logger.exception("Recognition detect failed: %s", e)
