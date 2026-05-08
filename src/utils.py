@@ -34,3 +34,15 @@ def free_gpu_memory() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def disable_ssl_verification() -> None:
+    """Disable SSL certificate verification (macOS compatibility fallback)."""
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+
+
+def embedding_to_list(emb) -> list:
+    """Convert numpy array or array-like to a plain Python list for Chroma."""
+    import numpy as np
+    return emb.tolist() if isinstance(emb, np.ndarray) else list(emb)

@@ -8,6 +8,20 @@ import torch
 from PIL import Image
 
 
+def normalize_mask(mask: np.ndarray) -> np.ndarray:
+    """Normalize mask to uint8 with values 0 or 255.
+
+    Args:
+        mask: Binary mask (H, W) with values in [0, 1] or [0, 255]
+
+    Returns:
+        Normalized uint8 mask
+    """
+    if mask.max() <= 1:
+        return (mask * 255).astype(np.uint8)
+    return mask.astype(np.uint8)
+
+
 def isolate_object(
     img: np.ndarray,
     mask: np.ndarray | None,
@@ -27,18 +41,13 @@ def isolate_object(
         return img
 
     # Ensure mask is binary (0 or 255)
-    if mask.max() <= 1:
-        mask = (mask * 255).astype(np.uint8)
-    else:
-        mask = mask.astype(np.uint8)
+    mask = normalize_mask(mask)
 
     # Exclude other masks if provided
     if other_masks:
         other_mask = np.zeros_like(mask)
         for om in other_masks:
-            if om.max() <= 1:
-                om = (om * 255).astype(np.uint8)
-            other_mask = cv2.bitwise_or(other_mask, om.astype(np.uint8))
+            other_mask = cv2.bitwise_or(other_mask, normalize_mask(om))
         mask = cv2.bitwise_and(mask, cv2.bitwise_not(other_mask))
 
     mask3ch = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)

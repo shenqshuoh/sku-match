@@ -16,7 +16,7 @@ async def start_embed_task(
     sku_id: str,
     media_urls: list[str],
     media_ids: list[str],
-    index_manager,
+    processor,
     image_storage,
     sku_name: str,
 ) -> None:
@@ -34,7 +34,7 @@ async def start_embed_task(
             for idx, (url, media_id) in enumerate(zip(media_urls, media_ids), start=1):
                 local_path = await image_storage.download_image(url)
                 await asyncio.to_thread(
-                    index_manager.embed_and_add_reference,
+                    processor.process_and_add,
                     sku_id,
                     sku_name,
                     media_id,

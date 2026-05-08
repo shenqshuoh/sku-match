@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _get_sku_or_error(db: AsyncSession, sku_id: str):
+    """Fetch SKU by sku_id, returning ApiResponse error if not found."""
+    sku = await db.scalar(select(SKU).where(SKU.sku_id == sku_id))
+    if sku is None:
+        return None, ApiResponse(code=0, msg=f"skuId '{sku_id}' not found")
+    return sku, None
+
+
 @router.post("/sku/new")
 async def new_sku(request: SKUNewRequest, req: Request, db: AsyncSession = Depends(get_db)):
     # 1. Check for duplicate skuId and trainJobId
@@ -67,7 +75,7 @@ async def new_sku(request: SKUNewRequest, req: Request, db: AsyncSession = Depen
         sku_id=request.skuId,
         media_urls=media_urls,
         media_ids=media_ids,
-        index_manager=req.app.state.index_manager,
+        processor=req.app.state.processor,
         image_storage=req.app.state.image_storage,
         sku_name=sku_name,
     )
@@ -79,9 +87,9 @@ async def new_sku(request: SKUNewRequest, req: Request, db: AsyncSession = Depen
 @router.post("/sku/update")
 async def update_sku(request: SKUUpdateRequest, req: Request, db: AsyncSession = Depends(get_db)):
     # 1. Check SKU exists
-    sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
-    if sku is None:
-        return ApiResponse(code=0, msg=f"skuId '{request.skuId}' not found")
+    sku, err = await _get_sku_or_error(db, request.skuId)
+    if err:
+        return err
 
     # 2. Update SKU name
     await db.execute(
@@ -90,8 +98,8 @@ async def update_sku(request: SKUUpdateRequest, req: Request, db: AsyncSession =
     await db.commit()
 
     # 3. Update Chroma metadata via index manager
-    if hasattr(req.app.state, "index_manager"):
-        await asyncio.to_thread(req.app.state.index_manager.update_sku_name, request.skuId, request.skuName)
+    if hasattr(req.app.state, "processor"):
+        await asyncio.to_thread(req.app.state.processor.update_sku_name, request.skuId, request.skuName)
 
     return StatusResponse(status="success")
 
@@ -105,8 +113,8 @@ async def delete_sku(request: SKUDeleteRequest, req: Request, db: AsyncSession =
         await db.commit()
 
     # 2. Remove references from Chroma
-    if hasattr(req.app.state, "index_manager"):
-        await asyncio.to_thread(req.app.state.index_manager.delete_sku_references, request.skuId)
+    if hasattr(req.app.state, "processor"):
+        await asyncio.to_thread(req.app.state.processor.delete_sku_references, request.skuId)
 
     return StatusResponse(status="success")
 
@@ -114,9 +122,9 @@ async def delete_sku(request: SKUDeleteRequest, req: Request, db: AsyncSession =
 @router.post("/sku/enable")
 async def enable_sku(request: SKUEnableRequest, req: Request, db: AsyncSession = Depends(get_db)):
     # 1. Check SKU exists
-    sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
-    if sku is None:
-        return ApiResponse(code=0, msg=f"skuId '{request.skuId}' not found")
+    sku, err = await _get_sku_or_error(db, request.skuId)
+    if err:
+        return err
 
     # 2. Update enabled flag
     await db.execute(
@@ -125,8 +133,8 @@ async def enable_sku(request: SKUEnableRequest, req: Request, db: AsyncSession =
     await db.commit()
 
     # 3. Update Chroma
-    if hasattr(req.app.state, "index_manager"):
-        await asyncio.to_thread(req.app.state.index_manager.set_sku_enabled, request.skuId, request.enabled)
+    if hasattr(req.app.state, "processor"):
+        await asyncio.to_thread(req.app.state.processor.set_sku_enabled, request.skuId, request.enabled)
 
     return StatusResponse(status="success")
 
@@ -176,9 +184,9 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
             if not item.mediaUrl:
                 return ApiResponse(code=0, msg="mediaUrl is required for add action")
         # 2. Check SKU exists
-        sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
-        if sku is None:
-            return ApiResponse(code=0, msg=f"skuId '{request.skuId}' not found")
+        sku, err = await _get_sku_or_error(db, request.skuId)
+        if err:
+            return err
         sku_name = sku.sku_name
         for item in request.media:
             if item.mediaId:
@@ -189,7 +197,7 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
             await db.commit()
             downloaded_path = await req.app.state.image_storage.download_image(item.mediaUrl)
             await asyncio.to_thread(
-                req.app.state.index_manager.embed_and_add_reference,
+                req.app.state.processor.process_and_add,
                 request.skuId,
                 sku_name,
                 media_id,
@@ -203,7 +211,7 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
             await db.execute(delete(SKUMedia).where(SKUMedia.media_id == item.mediaId))
             await db.commit()
             await asyncio.to_thread(
-                req.app.state.index_manager.delete_media_reference,
+                req.app.state.processor.delete_media_reference,
                 request.skuId, item.mediaId,
             )
         return StatusResponse(status="success")

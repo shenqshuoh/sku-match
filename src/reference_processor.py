@@ -10,6 +10,7 @@ from ultralytics import YOLOE
 from src.embedder import DINOv2Embedder
 from src.image_utils import extract_binary_masks, isolate_object
 from src.indexer import SKUIndexer
+from src.utils import embedding_to_list
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class ReferenceProcessor:
             source=str(image_path),
             device=self.device,
             conf=self.det_conf,
-            retina_masks=True,
+            retina_masks=False,
             verbose=False,
         )
         result = results[0]
@@ -196,10 +197,7 @@ class ReferenceProcessor:
             embeddings = self.embedder.embed_batch(crops)
 
             ids = [m[2] for m in batch_meta]
-            emb_list = [
-                e.tolist() if isinstance(e, np.ndarray) else list(e)
-                for e in embeddings
-            ]
+            emb_list = [embedding_to_list(e) for e in embeddings]
             metadatas = [
                 {"sku_id": m[0], "sku_name": m[1], "enabled": True}
                 for m in batch_meta

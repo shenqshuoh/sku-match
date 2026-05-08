@@ -3,8 +3,6 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from typing import cast
-
 import chromadb
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -14,10 +12,9 @@ from api.config import settings
 from api.database import init_db
 from api.routes import goods, logs, recognition, system
 from api.services.image_storage import ImageStorage
-from api.services.index_manager import IndexManager
 from api.services.recognition import RecognitionService
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
-from src.embedder import DINOv2Embedder, DINOv2Variant
+from src.embedder import DINOv2Embedder
 from src.indexer import SKUIndexer
 from src.reference_processor import ReferenceProcessor
 from src.utils import configure_ultralytics_weights
@@ -62,7 +59,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Loading DINOv2 embedder: %s (onnx=%s)", settings.EMB_MODEL, settings.USE_ONNX)
     embedder = DINOv2Embedder(
-        model_name=cast(DINOv2Variant, settings.EMB_MODEL),
+        model_name=settings.EMB_MODEL,
         device=device,
         use_onnx=settings.USE_ONNX,
     )
@@ -86,7 +83,6 @@ async def lifespan(app: FastAPI):
         indexer=indexer,
         device=device,
     )
-    index_manager = IndexManager(processor=processor)
     recognition_service = RecognitionService(
         detector=detector,
         embedder=embedder,
@@ -110,7 +106,7 @@ async def lifespan(app: FastAPI):
     app.state.chroma_client = chroma_client
     app.state.indexer = indexer
     app.state.image_storage = image_storage
-    app.state.index_manager = index_manager
+    app.state.processor = processor
     app.state.recognition_service = recognition_service
 
     logger.info("Startup complete")

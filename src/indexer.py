@@ -13,6 +13,7 @@ import chromadb
 import numpy as np
 
 from src.types import SKUReference
+from src.utils import disable_ssl_verification, embedding_to_list
 
 EPSILON = 1e-8
 
@@ -58,7 +59,7 @@ class SKUIndexer:
         self,
         collection: chromadb.Collection | None = None,
         persist_dir: str | Path | None = None,
-        search_multiplier: int = 0.5,
+        search_multiplier: float = 0.5,
         temperature: float = 0.5,
     ) -> None:
         self._collection = collection
@@ -77,8 +78,7 @@ class SKUIndexer:
 
     def init_collection(self, persist_dir: str | Path | None = None) -> None:
         if sys.platform == "darwin":
-            import ssl
-            ssl._create_default_https_context = ssl._create_unverified_context
+            disable_ssl_verification()
 
         dir_path = Path(persist_dir) if persist_dir else self._persist_dir or Path("chroma_data")
         dir_path.mkdir(parents=True, exist_ok=True)
@@ -114,7 +114,7 @@ class SKUIndexer:
         for i, ref in enumerate(references):
             doc_id = f"{ref.sku_id}__{i:04d}"
             ids.append(doc_id)
-            embeddings.append(ref.embedding.tolist() if isinstance(ref.embedding, np.ndarray) else list(ref.embedding))
+            embeddings.append(embedding_to_list(ref.embedding))
             metadatas.append({
                 "sku_id": ref.sku_id,
                 "sku_name": ref.sku_name,
@@ -202,10 +202,7 @@ class SKUIndexer:
         all_enabled_skus = set(self._sku_name_cache.keys())
         n_results = self._get_n_results_size()
 
-        query_list = [
-            emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
-            for emb in query_embeddings
-        ]
+        query_list = [embedding_to_list(emb) for emb in query_embeddings]
 
         results = self.collection.query(
             query_embeddings=query_list,
@@ -259,16 +256,13 @@ class SKUIndexer:
             self._refresh_cache()
         return self._sku_name_cache.get(sku_id)
 
-    def save(self, directory: Path, model_name: str) -> None:
-        """No-op: Chroma auto-persists. Kept for CLI backward compat."""
-
     def load(self, directory: Path, model_name: str) -> None:
         self.init_collection(persist_dir=directory)
 
     def _get_n_results_size(self) -> int:
         if not self._cache_valid:
             self._refresh_cache()
-        return max(self._enabled_sku_count * self._search_multiplier, 20)
+        return max(int(self._enabled_sku_count * self._search_multiplier), 20)
 
     def _refresh_cache(self) -> None:
         if self._collection is None:

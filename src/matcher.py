@@ -9,7 +9,7 @@ from PIL import Image
 from ultralytics import YOLOE
 
 from src.embedder import DINOv2Embedder, DINOv2Variant
-from src.image_utils import isolate_object, save_crop, extract_binary_masks
+from src.image_utils import isolate_object, normalize_mask, save_crop, extract_binary_masks
 from src.indexer import SKUIndexer, concentration_score
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.types import Detection, SKUMatch
@@ -86,8 +86,7 @@ class SKUMatcher:
                 first_valid = all_masks[0]
                 union_mask = np.zeros_like(first_valid, dtype=np.uint8)
                 for m in all_masks:
-                    m_uint8 = (m * 255).astype(np.uint8) if m.max() <= 1 else m.astype(np.uint8)
-                    union_mask = cv2.bitwise_or(union_mask, m_uint8)
+                    union_mask = cv2.bitwise_or(union_mask, normalize_mask(m))
 
             crops = []
             for det in detections:
@@ -95,7 +94,7 @@ class SKUMatcher:
                 # Exclusion = union minus own mask
                 exclusion = None
                 if union_mask is not None and det.mask is not None:
-                    own_uint8 = (det.mask * 255).astype(np.uint8) if det.mask.max() <= 1 else det.mask.astype(np.uint8)
+                    own_uint8 = normalize_mask(det.mask)
                     exclusion = cv2.bitwise_and(union_mask, cv2.bitwise_not(own_uint8))
                 isolated = isolate_object(img_array, det.mask, [exclusion] if exclusion is not None else None)
                 crop = Image.fromarray(isolated[y1:y2, x1:x2])
@@ -242,3 +241,4 @@ class SKUMatcher:
         # Store target device (not initial device, which may be CPU for swap)
         instance._device = device
         return instance
+

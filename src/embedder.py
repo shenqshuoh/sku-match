@@ -11,6 +11,8 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
+from src.utils import detect_device, disable_ssl_verification
+
 DINOv2Variant = Literal["dinov2_vits14", "dinov2_vitb14", "dinov2_vitl14"]
 DIMENSIONS = {
     "dinov2_vits14": 384,
@@ -31,13 +33,7 @@ class DINOv2Embedder:
         use_onnx: bool = False,
     ):
         if device is None:
-            # Auto-detect device with a simple priority: CUDA > MPS > CPU
-            if torch.cuda.is_available():
-                device = "cuda"
-            elif torch.backends.mps.is_available():
-                device = "mps"
-            else:
-                device = "cpu"
+            device = detect_device()
 
         self.model_name = model_name
         self.device = device
@@ -90,7 +86,7 @@ class DINOv2Embedder:
             else:
                 # Fallback: download from internet (requires network)
                 if sys.platform == "darwin":
-                    ssl._create_default_https_context = ssl._create_unverified_context
+                    disable_ssl_verification()
                 self.model = torch.hub.load(
                     str(_vendor_dir),
                     model_name,

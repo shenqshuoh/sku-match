@@ -37,7 +37,7 @@ def detect(
         augment=True,
         save=True,
         save_crop=False,
-        retina_masks=True,
+        retina_masks=False,
     )
     output_dir = Path(first_result[0].save_dir)
     crops_dir = output_dir / "crops"
@@ -54,7 +54,7 @@ def detect(
             augment=True,
             save=False,
             save_crop=False,
-            retina_masks=True,
+            retina_masks=False,
         )
         _save_result(results[0], output_dir, crops_dir)
         free_gpu_memory()

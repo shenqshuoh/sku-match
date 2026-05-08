@@ -1,5 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.embedder import DINOv2Variant
+
 
 class Settings(BaseSettings):
     DATA_DIR: str = "data"
@@ -9,7 +11,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./sku_match.db"
 
     DET_MODEL: str = "models/yoloe-26l-seg.pt"
-    EMB_MODEL: str = "dinov2_vits14"
+    EMB_MODEL: DINOv2Variant = "dinov2_vits14"
     DEVICE: str | None = None
 
     DET_CONF: float = 0.25
