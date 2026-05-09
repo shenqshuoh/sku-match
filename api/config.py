@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     API_KEY: str = ""  # Empty = auth disabled
     RATE_LIMIT: int = 0  # Requests per minute per IP; 0 = disabled
 
+    QINIU_TOKEN_URL: str = "http://172.16.88.119:12001/api/qiniu/token/vr"
+    QINIU_UPLOAD_URL: str = "https://upload.qiniup.com"
+    QINIU_DOMAIN: str = "https://vr.jihaihotpot.com/"
+    QINIU_KEY_PREFIX: str = "sku-match/"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

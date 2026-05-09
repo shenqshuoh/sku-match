@@ -134,7 +134,7 @@ class DetectData(BaseModel):
 class ApiResponse(BaseModel):
     code: int = 1
     data: Any | None = None
-    msg: str = "\u6210\u529f"
+    msg: str = "success"
 
 
 class MediaResponse(BaseModel):

@@ -48,12 +48,25 @@ async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depend
         # 4b. Cleanup downloaded temp file
         req.app.state.image_storage.cleanup_download(downloaded_path)
 
-        # 5. Update log with result and visual image path
+        # 5. Upload annotated image to Qiniu
+        matched_image = result.get("matched_image", "")
+        if matched_image:
+            annotated_path = req.app.state.image_storage.results_dir / matched_image.lstrip("/")
+            if annotated_path.exists():
+                try:
+                    cdn_url = await req.app.state.image_storage.upload_to_qiniu(annotated_path)
+                    if cdn_url:
+                        result["matched_image"] = cdn_url
+                        matched_image = cdn_url
+                except Exception as e:
+                    logger.warning("Qiniu upload failed, keeping local path: %s", e)
+
+        # 6. Update log with result and visual image path
         log.ai_result_json = json.dumps(result)
-        log.visual_image_path = result.get("matched_image") if isinstance(result, dict) else None
+        log.visual_image_path = matched_image
         await db.commit()
 
-        # 6. Return response
+        # 7. Return response
         return ApiResponse(data=result)
     except Exception as e:
         logger.exception("Recognition detect failed: %s", e)

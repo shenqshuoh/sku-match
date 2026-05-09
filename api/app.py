@@ -77,7 +77,14 @@ async def lifespan(app: FastAPI):
     )
 
     indexer = SKUIndexer(collection=collection)
-    image_storage = ImageStorage(results_dir=settings.RESULTS_DIR, download_timeout=settings.DOWNLOAD_TIMEOUT)
+    image_storage = ImageStorage(
+        results_dir=settings.RESULTS_DIR,
+        download_timeout=settings.DOWNLOAD_TIMEOUT,
+        qiniu_token_url=settings.QINIU_TOKEN_URL,
+        qiniu_upload_url=settings.QINIU_UPLOAD_URL,
+        qiniu_domain=settings.QINIU_DOMAIN,
+        qiniu_key_prefix=settings.QINIU_KEY_PREFIX,
+    )
     processor = ReferenceProcessor(
         detector=detector,
         embedder=embedder,
