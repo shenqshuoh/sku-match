@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.database import get_db
 from api.models import RecognitionLog
-from api.schemas import DetectRequest, FixRequest, ApiResponse, StatusResponse
+from api.schemas import DetectRequest, FixRequest, ApiResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -14,6 +14,7 @@ router = APIRouter()
 
 @router.post("/detect")
 async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depends(get_db)):
+    downloaded_path = None
     try:
         # 1. Check for duplicate taskId
         existing = await db.execute(
@@ -44,6 +45,9 @@ async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depend
             req.app.state.device,
         )
 
+        # 4b. Cleanup downloaded temp file
+        req.app.state.image_storage.cleanup_download(downloaded_path)
+
         # 5. Update log with result and visual image path
         log.ai_result_json = json.dumps(result)
         log.visual_image_path = result.get("matched_image") if isinstance(result, dict) else None
@@ -53,6 +57,11 @@ async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depend
         return ApiResponse(data=result)
     except Exception as e:
         logger.exception("Recognition detect failed: %s", e)
+        if downloaded_path is not None:
+            try:
+                req.app.state.image_storage.cleanup_download(downloaded_path)
+            except Exception:
+                pass
         return ApiResponse(code=0, msg=str(e))
 
 
@@ -68,7 +77,7 @@ async def fix(request: FixRequest, db: AsyncSession = Depends(get_db)):
         # 2. Store user corrections as JSON text
         log.user_correction_json = json.dumps([fi.model_dump() for fi in request.fixItems])
         await db.commit()
-        return StatusResponse(status="success")
+        return ApiResponse(data={"status": "success"})
     except Exception as e:
         logger.exception("Recognition fix failed: %s", e)
         return ApiResponse(code=0, msg=str(e))

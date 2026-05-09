@@ -26,6 +26,9 @@ class Settings(BaseSettings):
 
     DOWNLOAD_TIMEOUT: int = 30
 
+    API_KEY: str = ""  # Empty = auth disabled
+    RATE_LIMIT: int = 0  # Requests per minute per IP; 0 = disabled
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

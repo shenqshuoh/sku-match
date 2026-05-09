@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
 from api.models import TrainJob
-from api.schemas import TrainStatusResponse, ApiResponse
+from api.schemas import ApiResponse
 
 router = APIRouter()
 
@@ -16,4 +16,8 @@ async def train_status(trainJobId: str, db: AsyncSession = Depends(get_db)):
     tj = result.scalar_one_or_none()
     if tj is None:
         return ApiResponse(code=0, msg="train_job not found")
-    return TrainStatusResponse(status=tj.status, progress=tj.progress, estimated_time=tj.estimated_time)
+    return ApiResponse(data={
+        "status": tj.status,
+        "progress": tj.progress,
+        "estimated_time": tj.estimated_time,
+    })

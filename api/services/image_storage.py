@@ -42,6 +42,15 @@ class ImageStorage:
             logger.error("Failed to download %s: %s", url, e)
             raise ValueError(f"Could not download image from {url}: {e}") from e
 
+    def cleanup_download(self, path: Path) -> None:
+        """Remove a downloaded temp file. Silently ignore if already deleted."""
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                logger.debug("Cleaned up temp file: %s", path)
+        except Exception:
+            logger.warning("Failed to cleanup temp file: %s", path, exc_info=True)
+
     def get_result_path(self, task_id: str) -> Path:
         annotated_dir = self.results_dir / "annotated"
         annotated_dir.mkdir(parents=True, exist_ok=True)

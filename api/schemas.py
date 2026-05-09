@@ -1,13 +1,27 @@
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class DetectRequest(BaseModel):
-    taskId: str
-    mode: str = "IMAGE"
-    files: str
+    taskId: str = Field(max_length=128)
+    mode: Literal["IMAGE", "VIDEO"] = "IMAGE"
+    files: str = Field(min_length=1, max_length=2048)
     roiRect: list[float] | None = None
+
+    @field_validator("taskId")
+    @classmethod
+    def validate_task_id(cls, v):
+        if not v.strip():
+            raise ValueError("taskId must not be empty")
+        return v
+
+    @field_validator("files")
+    @classmethod
+    def validate_files(cls, v):
+        if not v.strip():
+            raise ValueError("files must not be empty")
+        return v
 
     @field_validator("roiRect")
     @classmethod
@@ -18,35 +32,71 @@ class DetectRequest(BaseModel):
 
 
 class FixItem(BaseModel):
-    fixType: str
+    fixType: str = Field(max_length=64)
     itemId: int | None = None
     roiRect: list[float] | None = None
-    skuId: str
+    skuId: str = Field(max_length=128)
 
 
 class FixRequest(BaseModel):
-    taskId: str
-    fixItems: list[FixItem]
+    taskId: str = Field(max_length=128)
+    fixItems: list[FixItem] = Field(min_length=1)
+
+    @field_validator("taskId")
+    @classmethod
+    def validate_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("taskId must not be empty")
+        return v
 
 
 class SKUNewRequest(BaseModel):
-    skuId: str
-    skuName: str
-    files: list[str]
-    trainJobId: str
+    skuId: str = Field(max_length=128)
+    skuName: str = Field(max_length=256)
+    files: list[str] = Field(min_length=1, max_length=50)
+    trainJobId: str = Field(max_length=128)
+
+    @field_validator("skuId", "skuName", "trainJobId")
+    @classmethod
+    def validate_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("Field must not be empty")
+        return v
+
+    @field_validator("files")
+    @classmethod
+    def validate_files_list(cls, v):
+        for url in v:
+            if not url.strip():
+                raise ValueError("File URLs must not be empty")
+        return v
 
 
 class SKUUpdateRequest(BaseModel):
-    skuId: str
-    skuName: str
+    skuId: str = Field(max_length=128)
+    skuName: str = Field(max_length=256)
+
+    @field_validator("skuId", "skuName")
+    @classmethod
+    def validate_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("Field must not be empty")
+        return v
 
 
 class SKUDeleteRequest(BaseModel):
-    skuId: str
+    skuId: str = Field(max_length=128)
+
+    @field_validator("skuId")
+    @classmethod
+    def validate_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("skuId must not be empty")
+        return v
 
 
 class SKUEnableRequest(BaseModel):
-    skuId: str
+    skuId: str = Field(max_length=128)
     enabled: bool
 
 
@@ -56,8 +106,8 @@ class MediaItem(BaseModel):
 
 
 class SKUMediaRequest(BaseModel):
-    skuId: str
-    action: str
+    skuId: str = Field(max_length=128)
+    action: Literal["add", "delete"]
     media: list[MediaItem]
 
 
@@ -106,19 +156,3 @@ class SKUListData(BaseModel):
     page: int
     pageSize: int
     total: int
-
-
-class StatusResponse(BaseModel):
-    status: str
-
-
-class TrainStatusResponse(BaseModel):
-    status: str
-    progress: int
-    estimated_time: str | None
-
-
-class LogResponse(BaseModel):
-    ai_result: Any | None
-    user_correction: Any | None
-    visual_image_url: str | None

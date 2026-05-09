@@ -21,7 +21,6 @@ from api.schemas import (
     ApiResponse,
     SKUListData,
     MediaResponse,
-    StatusResponse,
 )
 from api.tasks import start_embed_task
 
@@ -101,7 +100,7 @@ async def update_sku(request: SKUUpdateRequest, req: Request, db: AsyncSession =
     if hasattr(req.app.state, "processor"):
         await asyncio.to_thread(req.app.state.processor.update_sku_name, request.skuId, request.skuName)
 
-    return StatusResponse(status="success")
+    return ApiResponse(data={"status": "success"})
 
 
 @router.post("/sku/delete")
@@ -116,7 +115,7 @@ async def delete_sku(request: SKUDeleteRequest, req: Request, db: AsyncSession =
     if hasattr(req.app.state, "processor"):
         await asyncio.to_thread(req.app.state.processor.delete_sku_references, request.skuId)
 
-    return StatusResponse(status="success")
+    return ApiResponse(data={"status": "success"})
 
 
 @router.post("/sku/enable")
@@ -136,7 +135,7 @@ async def enable_sku(request: SKUEnableRequest, req: Request, db: AsyncSession =
     if hasattr(req.app.state, "processor"):
         await asyncio.to_thread(req.app.state.processor.set_sku_enabled, request.skuId, request.enabled)
 
-    return StatusResponse(status="success")
+    return ApiResponse(data={"status": "success"})
 
 
 @router.get("/sku/list")
@@ -203,7 +202,7 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
                 media_id,
                 downloaded_path,
             )
-        return StatusResponse(status="success")
+        return ApiResponse(data={"status": "success"})
     elif request.action == "delete":
         for item in request.media:
             if not item.mediaId:
@@ -214,6 +213,6 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
                 req.app.state.processor.delete_media_reference,
                 request.skuId, item.mediaId,
             )
-        return StatusResponse(status="success")
+        return ApiResponse(data={"status": "success"})
     else:
         return ApiResponse(code=0, msg="Unsupported action")

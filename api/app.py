@@ -4,10 +4,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import chromadb
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLOE
 
+from api.auth import check_rate_limit, verify_api_key
 from api.config import settings
 from api.database import init_db
 from api.routes import goods, logs, recognition, system
@@ -131,10 +132,14 @@ app = FastAPI(
 )
 
 # Register routers
-app.include_router(recognition.router, prefix="/api/v1/recognition", tags=["recognition"])
-app.include_router(goods.router, prefix="/api/v1/goods", tags=["goods"])
-app.include_router(logs.router, prefix="/api/v1/logs", tags=["logs"])
-app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+app.include_router(recognition.router, prefix="/api/v1/recognition", tags=["recognition"],
+                   dependencies=[Depends(verify_api_key), Depends(check_rate_limit)])
+app.include_router(goods.router, prefix="/api/v1/goods", tags=["goods"],
+                   dependencies=[Depends(verify_api_key), Depends(check_rate_limit)])
+app.include_router(logs.router, prefix="/api/v1/logs", tags=["logs"],
+                   dependencies=[Depends(verify_api_key), Depends(check_rate_limit)])
+app.include_router(system.router, prefix="/api/v1/system", tags=["system"],
+                   dependencies=[Depends(verify_api_key), Depends(check_rate_limit)])
 
 
 @app.get("/health")
