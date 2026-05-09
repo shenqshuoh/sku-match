@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     RATE_LIMIT: int = 0  # Requests per minute per IP; 0 = disabled
 
     QINIU_TOKEN_URL: str = "http://172.16.88.119:12001/api/qiniu/token/vr"
-    QINIU_UPLOAD_URL: str = "https://upload.qiniup.com"
+    QINIU_UPLOAD_URL: str = "https://upload-z2.qiniup.com"
     QINIU_DOMAIN: str = "https://vr.jihaihotpot.com/"
     QINIU_KEY_PREFIX: str = "sku-match/"
 

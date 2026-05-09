@@ -51,7 +51,7 @@ async def detect(request: DetectRequest, req: Request, db: AsyncSession = Depend
         # 5. Upload annotated image to Qiniu
         matched_image = result.get("matched_image", "")
         if matched_image:
-            annotated_path = req.app.state.image_storage.results_dir / matched_image.lstrip("/")
+            annotated_path = req.app.state.image_storage.get_result_path(request.taskId)
             if annotated_path.exists():
                 try:
                     cdn_url = await req.app.state.image_storage.upload_to_qiniu(annotated_path)
