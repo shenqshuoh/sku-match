@@ -147,17 +147,17 @@ Evaluated additions to the beverage-cashier pipeline. Updated as new options are
 
 ### OSS Result Image Hosting
 
-**What**: Upload annotated result images to object storage (Alibaba OSS) instead of serving locally.
+**What**: Upload annotated result images to cloud storage instead of serving locally.
 
-**Status**: ⏳ Design decision needed
+**Status**: ✅ Done — implemented via Qiniu cloud storage
 
 | Pros | Cons |
 |------|------|
-| Scales horizontally (multiple API instances) | External dependency (OSS availability) |
-| No local disk management | Adds latency for upload |
-| CDN-cacheable URLs for client | Configuration complexity (credentials, buckets) |
+| Scales horizontally (multiple API instances) | External dependency (Qiniu availability) |
+| No local disk management | Adds latency for upload (~200ms) |
+| CDN-cacheable URLs for client | Configuration complexity (token endpoint, region) |
 
-**When to implement**: Multi-instance deployment or disk space becomes an issue.
+**Implementation**: `api/services/image_storage.py` — `upload_to_qiniu()` method with token caching. Region: South China (z2). Key format: `sku-match/{YYYY-MM/DD}/{filename}`. Falls back to local path on upload failure. Configured via `QINIU_TOKEN_URL`, `QINIU_UPLOAD_URL`, `QINIU_DOMAIN`, `QINIU_KEY_PREFIX` env vars.
 
 ---
 
@@ -169,9 +169,9 @@ Evaluated additions to the beverage-cashier pipeline. Updated as new options are
 | Device auto-detect (cuda→mps→cpu) | ✅ Done | All modules default to auto-detect |
 | `sku_name` in data model | ✅ Done | Added to SKUReference, SKUMatch, indexer metadata |
 | SSL fix (macOS guard) | ✅ Done | embedder.py |
-| `clip` dep removal | ✅ Done | Dead dependency |
+| `clip` dep vendored | ✅ Done | Vendored at `vendor/clip_package/`, GFW-safe |
 | `coremltools` moved to optional | ✅ Done | `[export]` group |
 
 ---
 
-*Last updated: 2026-04-27*
+*Last updated: 2026-05-09*

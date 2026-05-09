@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-05-08
+**Generated:** 2026-05-09
 **Project:** sku-match v0.2.0
 
 ## OVERVIEW
@@ -26,15 +26,16 @@ sku-match/
 │   ├── indexer.py            # Chroma-backed SKUIndexer: build, add/delete/enable/search
 │   ├── matcher.py            # SKUMatcher: detection + SKU matching pipeline
 │   ├── types.py              # Dataclasses: Detection, SKUReference, SKUMatch
-│   ├── utils.py              # Shared: detect_device(), free_gpu_memory()
+│   ├── utils.py              # Shared: detect_device(), free_gpu_memory(), disable_ssl_verification(), embedding_to_list(), configure_ultralytics_weights()
 │   ├── reference_processor.py # ReferenceProcessor: crop→embed→index pipeline
-│   ├── image_utils.py        # isolate_object, save_crop, process_detection_crops, etc.
+│   ├── image_utils.py        # isolate_object, save_crop, process_detection_crops, draw_annotations, CJK font rendering via PIL (Noto Sans CJK)
 │   ├── yoloe2o365.py         # CoreML export utility
 │   └── classes/
 │       ├── beverage_cls.py       # BEVERAGE_CONTAINER_CLASSES (7 items)
 │       └── objects365_classes.py  # 365-class list (legacy, used for name lookups)
 ├── api/
 │   ├── app.py                # FastAPI + lifespan: loads detector, embedder, Chroma, services
+│   ├── auth.py               # API key auth + per-IP rate limiting (disabled by default)
 │   ├── config.py             # pydantic-settings: DET_MODEL, EMB_MODEL, DEVICE, MATCH_CONF, etc.
 │   ├── database.py           # SQLAlchemy async engine + get_db + init_db
 │   ├── models.py             # ORM: SKU, SKUMedia, RecognitionLog, TrainJob
@@ -47,8 +48,7 @@ sku-match/
 │   │   └── system.py         # GET /train-status/get
 │   └── services/
 │       ├── recognition.py    # RecognitionService: download → detect → embed → match → annotate
-│       ├── index_manager.py  # IndexManager: thin adapter wrapping ReferenceProcessor
-│       └── image_storage.py  # ImageStorage: download (local/URL), get result path/URL
+│       └── image_storage.py  # ImageStorage: download (local/URL), get result path/URL, upload_to_qiniu, cleanup_download
 ├── scripts/
 │   ├── build_index.py        # Build Chroma index from reference images
 │   ├── crop_reference.py     # Crop raw refs with YOLOE
@@ -61,7 +61,6 @@ sku-match/
 ├── chroma_data/              # Chroma persistence (gitignored)
 ├── results/                  # API result images (annotated)
 ├── runs/                     # CLI output directory
-├── index/                    # Chroma index data (chroma.sqlite3)
 └── tests/
     └── test_detection.py     # Smoke test
 ```
@@ -73,15 +72,15 @@ sku-match/
 | CLI entry | main.py | Default: SKU matching. Use --detection-only for detection only |
 | API entry | api/app.py | FastAPI + lifespan, uvicorn server |
 | API config | api/config.py | pydantic-settings, .env file |
+| API auth | api/auth.py | API key verification + per-IP rate limiting (disabled by default) |
 | Detection logic | src/core.py | detect() function (CLI) |
 | DINOv2 embedder | src/embedder.py | 3 variants: vits14(384-dim), vitb14(768-dim), vitl14(1024-dim). Optional ONNX backend |
 | SKU indexer | src/indexer.py | Chroma-backed: search_batch with top-2-per-SKU scoring |
 | Detection + matching | src/matcher.py | SKUMatcher class with crop saving |
 | Reference processing | src/reference_processor.py | crop→embed→index pipeline, build_from_directory() |
 | Recognition service | api/services/recognition.py | Full pipeline: download → detect → embed → match → annotate |
-| Index manager | api/services/index_manager.py | Wraps ReferenceProcessor for API (sync, called via asyncio.to_thread) |
-| Shared utilities | src/utils.py | detect_device(), free_gpu_memory() |
-| Image utilities | src/image_utils.py | isolate_object, save_crop, draw_annotations |
+| Shared utilities | src/utils.py | detect_device(), free_gpu_memory(), disable_ssl_verification(), embedding_to_list(), configure_ultralytics_weights() |
+| Image utilities | src/image_utils.py | isolate_object, save_crop, draw_annotations, CJK font rendering via PIL (Noto Sans CJK) |
 | Build ref index | scripts/build_index.py | --model arg for embedding variant selection |
 | Crop raw refs | scripts/crop_reference.py | Pre-process raw photos with YOLOE detection |
 | API routes | api/routes/ | goods.py (SKU CRUD), recognition.py (detect/fix), logs.py, system.py |
@@ -104,11 +103,17 @@ sku-match/
 | SKUMatcher | class | src/matcher.py | Detection + SKU matching with crop saving |
 | detect_device() | function | src/utils.py | Auto-detect: cuda → mps → cpu |
 | free_gpu_memory() | function | src/utils.py | Release cached GPU memory |
+| disable_ssl_verification() | function | src/utils.py | Disable SSL cert verification (macOS compat) |
+| embedding_to_list() | function | src/utils.py | Convert numpy/torch embedding to plain list |
 | configure_ultralytics_weights | function | src/utils.py | Sets ultralytics weights_dir to local models/ |
+| _load_cjk_font() | function | src/image_utils.py | Load Noto Sans CJK font for Chinese text rendering |
 | ReferenceProcessor | class | src/reference_processor.py | Crop→embed→index pipeline with mask isolation |
 | RecognitionService | class | api/services/recognition.py | Full recognition pipeline (sync) |
-| IndexManager | class | api/services/index_manager.py | ReferenceProcessor adapter for API (sync methods) |
 | ImageStorage | class | api/services/image_storage.py | Download images, manage result paths |
+| upload_to_qiniu() | method | api/services/image_storage.py | Upload annotated image to Qiniu cloud storage |
+| cleanup_download() | method | api/services/image_storage.py | Remove downloaded temp image after processing |
+| verify_api_key() | function | api/auth.py | Verify X-API-Key header (disabled if API_KEY empty) |
+| check_rate_limit() | function | api/auth.py | Per-IP rate limiting (disabled if RATE_LIMIT=0) |
 | Settings | class | api/config.py | pydantic-settings configuration |
 | export_yoloe_to_lvis() | function | src/yoloe2o365.py | CoreML export |
 
@@ -126,7 +131,10 @@ sku-match/
 | POST | /api/v1/goods/sku/media | goods.manage_media | Add/delete SKU media |
 | GET  | /api/v1/logs/recognition/get | logs.get_log | Query recognition log by taskId |
 | GET  | /api/v1/system/train-status/get | system.train_status | Query train job status |
+| GET  | /results/{path} | app.static | Static file serving for result images |
 | GET  | /health | app.health | Health check |
+
+> **Note:** All `/api/v1/*` endpoints have `Depends(verify_api_key)` and `Depends(check_rate_limit)` (disabled by default via config — empty `API_KEY` and `RATE_LIMIT=0`).
 
 ## ENTRY POINTS
 
@@ -136,7 +144,7 @@ sku-match/
 | `python main.py --detection-only` | main.py | Detection only mode |
 | `python main.py --det-model X --emb-model Y` | main.py | Custom models |
 | `python -m api.app` | api/app.py | Start API server |
-| `python scripts/build_index.py -r data/references/ -o index/ -m dinov2_vitb14` | build_index.py | Build Chroma index |
+| `python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitb14` | build_index.py | Build Chroma index |
 | `python scripts/crop_reference.py -r data/references_raw/ -o data/references/` | crop_reference.py | Crop raw reference photos |
 | `python tests/test_detection.py` | test_detection.py | Smoke tests |
 
@@ -147,17 +155,22 @@ sku-match/
 - **Linting**: Ruff configured (line-length: 100, py310 target)
 - **Device**: Auto-detect via `detect_device()` (cuda → mps → cpu)
 - **Detection classes**: `BEVERAGE_CONTAINER_CLASSES` (7 items: Bottle, Canned, etc.)
-- **Index**: Chroma vector store with cosine similarity, top-2-per-SKU scoring
+- **Index**: Chroma vector store with cosine similarity, top-2-per-SKU scoring. Unified path: `chroma_data/`
 - **API prefix**: `/api/v1/`
+- **API response**: All endpoints return `ApiResponse(code=1/0, data=..., msg="success")`
 - **Async pattern**: CPU-bound work runs via `asyncio.to_thread()` to avoid blocking event loop
 - **Crop naming**: `{image_name}_{index}_{sku_id}.jpg`
 - **FP16**: Both YOLOE and DINOv2 use `model.half()` at load time when device=cuda
 - **GPU concurrency**: API uses dedicated ThreadPoolExecutor(max_workers=1) for GPU inference
 - **Warm-up**: YOLOE warm-up prediction runs at API startup
+- **CJK rendering**: Annotations use PIL + Noto Sans CJK font for Chinese character support
+- **Qiniu CDN**: Annotated images uploaded to Qiniu, `matched_image` returns full CDN URL. Falls back to local path if upload fails.
+- **DB pool**: SQLAlchemy pool_size=5, max_overflow=10, pool_recycle=3600, pool_pre_ping=True
+- **Temp cleanup**: Downloaded images cleaned up after processing in both recognition routes and embedding tasks
+- **Index operations**: All Chroma writes go through `ReferenceProcessor` (sync), called via `asyncio.to_thread()` in routes. IndexManager removed.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
-- **Hardcoded paths**: `data/images` path hardcoded in CLI
 - **sys.path hack**: tests/test_detection.py, scripts/, and scripts/export_onnx.py manipulate sys.path
 - **No docstrings**: Minimal documentation
 - **No [project.scripts]**: pyproject.toml lacks console_scripts entry
@@ -191,11 +204,14 @@ python -m api.app
 # API: With debug/reload
 DEBUG=true python -m api.app
 
+# API: With Qiniu config
+QINIU_ACCESS_KEY=xxx QINIU_SECRET_KEY=xxx QINIU_BUCKET=xxx python -m api.app
+
 # Build Chroma index from reference images
-python scripts/build_index.py -r data/references/ -o index/ -m dinov2_vitb14
+python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitb14
 
 # Build index with different embedding model
-python scripts/build_index.py -r data/references/ -o index/ -m dinov2_vits14
+python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vits14
 
 # Crop raw reference photos
 python scripts/crop_reference.py -r data/references_raw/ -o data/references/
@@ -205,23 +221,29 @@ python scripts/export_onnx.py --model dinov2_vits14
 
 # Run smoke test
 python tests/test_detection.py
+
+# Linux: Install CJK font (required for Chinese text in annotations)
+apt-get install fonts-noto-cjk
 ```
 
 ## NOTES
 
 - **Default mode**: SKU matching (not detection-only)
 - **Embedding models**: dinov2_vits14 (384-dim, default), dinov2_vitb14 (768-dim), dinov2_vitl14 (1024-dim)
-- **Chroma index**: PersistentClient with HNSW cosine similarity. Incremental add/delete — no full rebuild needed
+- **Chroma index**: PersistentClient with HNSW cosine similarity. Incremental add/delete — no full rebuild needed. Unified path: `chroma_data/` across CLI, API, and build scripts.
 - **Match scoring**: Top-2-per-SKU cosine similarity sum → softmax probability distribution (0–1 range). Threshold default 0.5. Concentration score (top-1 share of top-K probability mass) replaces match_ratio. Detection rank positions (top2_ranks) tracked per match.
 - **Device auto-detect**: `detect_device()` returns cuda → mps → cpu
 - **SSL fix**: Disabled certificate verification for macOS compatibility (fallback path only when local weights unavailable)
 - **First run**: Downloads YOLOE model (~400MB). DINOv2 weights vendored locally at models/*.pth (no download needed).
 - **API state**: Models loaded once at FastAPI lifespan startup, reused across requests
-- **ReferenceProcessor**: Unified crop→embed→index pipeline. Crops via YOLOE detection + mask isolation, falls back to full-image embedding. Used by both CLI auto-build and API index management.
+- **ReferenceProcessor**: Unified crop→embed→index pipeline. Crops via YOLOE detection + mask isolation, falls back to full-image embedding. Used directly by API routes (IndexManager adapter removed).
 - **Detection confidence**: `--conf` flag (CLI) and `DET_CONF` setting (API) control YOLOE detection threshold. Passed to `predict(conf=)`. retina_masks=False to prevent OOM on high-res images.
 - **GFW compatibility**: `clip` vendored locally at `vendor/clip_package/`. `mobileclip2_b.ts` in `models/` avoids GitHub download. PyPI via aliyun mirror.
-- **Index operations**: All Chroma writes go through `IndexManager` (sync), called via `asyncio.to_thread()` in routes
+- **Index operations**: All Chroma writes go through `ReferenceProcessor` (sync), called via `asyncio.to_thread()` in routes. IndexManager removed.
 - **FP16 inference**: Both YOLOE and DINOv2 use model.half() at load time when device=cuda. ~1.8x speedup over FP32 on L20 GPU.
 - **ONNX backend**: Optional via --onnx flag / USE_ONNX setting. Export with scripts/export_onnx.py. Currently not viable on 2GB GPU (ONNX Runtime lacks flash attention).
 - **DINOv2 vendoring**: Full dinov2 source at vendor/dinov2/ + weights at models/dinov2_*_pretrain.pth. No internet needed at runtime.
 - **Performance**: See PERF_PLAN.md for optimization details. FP16 ~1.8x faster. GPU thread pool prevents OOM under concurrent load.
+- **Qiniu integration**: Annotated result images uploaded to Qiniu cloud storage. Token cached until 60s before deadline. Key format: `sku-match/{YYYY-MM/DD}/{filename}`. Region: South China (z2).
+- **API auth**: Optional API key authentication via `X-API-Key` header. Rate limiting per-IP (requests/minute). Both disabled by default (empty API_KEY, RATE_LIMIT=0).
+- **Input validation**: Pydantic Field constraints (max_length, min_length), Literal types for mode/action, non-empty string validators on all request models.

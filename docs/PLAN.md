@@ -139,7 +139,7 @@ api/
     "matched_image": "https://.../results/taskId_annotated.jpg",
     "taskId": "..."
   },
-  "msg": "成功"
+  "msg": "success"
 }
 ```
 
@@ -354,7 +354,6 @@ beverage-cashier/
 │   │   └── system.py
 │   ├── services/
 │   │   ├── recognition.py
-│   │   ├── index_manager.py    # Chroma collection management + top-2 matching
 │   │   └── image_storage.py
 │   └── tasks.py
 ├── src/                          # EXISTING - ML pipeline
