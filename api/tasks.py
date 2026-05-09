@@ -40,6 +40,7 @@ async def start_embed_task(
                     media_id,
                     local_path,
                 )
+                await image_storage.cleanup_download(local_path)
                 progress = int((idx / max(len(media_urls), 1)) * 100)
                 async with async_session() as session:
                     await session.execute(

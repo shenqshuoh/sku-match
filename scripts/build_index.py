@@ -85,7 +85,7 @@ def main():
         "-o",
         "--output-dir",
         type=Path,
-        default="index/",
+        default="chroma_data/",
         help="Output directory for the Chroma index",
     )
     parser.add_argument(

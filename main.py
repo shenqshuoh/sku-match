@@ -170,8 +170,8 @@ def main():
     parser.add_argument(
         "--index",
         type=Path,
-        default="index/",
-        help="Index directory for SKU matching (default: index/)",
+        default="chroma_data/",
+        help="Index directory for SKU matching (default: chroma_data/)",
     )
     parser.add_argument(
         "--det-model",

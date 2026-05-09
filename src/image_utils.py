@@ -5,7 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 def normalize_mask(mask: np.ndarray) -> np.ndarray:
@@ -152,12 +152,32 @@ def extract_binary_masks(result) -> list[np.ndarray | None]:
     return masks
 
 
+def _load_cjk_font(size: int = 24) -> ImageFont.FreeTypeFont:
+    """Load a CJK-capable TrueType font, falling back to PIL default."""
+    import glob
+
+    candidates = glob.glob("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
+    candidates += glob.glob("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc")
+    candidates += glob.glob("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc")
+
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except (OSError, IOError):
+            continue
+
+    # Fallback: PIL default (won't render CJK, but won't crash)
+    return ImageFont.load_default()
+
+
 def draw_annotations(
     image: np.ndarray,
     detections: list[dict],
     output_path: Path,
 ) -> Path:
     """Draw bounding boxes and SKU labels on image and save.
+
+    Uses PIL for text rendering to support CJK characters.
 
     Args:
         image: Original image as numpy array (RGB, HxWx3)
@@ -170,39 +190,30 @@ def draw_annotations(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    annotated = image.copy()
+    pil_image = Image.fromarray(image)
+    draw = ImageDraw.Draw(pil_image)
+    font = _load_cjk_font(size=24)
 
     for det in detections:
         x1, y1, x2, y2 = map(int, det["bbox"])
         sku_name = det.get("sku_name", "unknown")
         score = det.get("match_score", 0.0)
 
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        # Bounding box (green)
+        draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
 
+        # Label background
         label = f"{sku_name} ({score:.2f})"
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        thickness = 1
-        (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-
-        cv2.rectangle(
-            annotated,
-            (x1, y1 - text_h - baseline - 6),
-            (x1 + text_w, y1),
-            (0, 255, 0),
-            -1,
+        text_bbox = draw.textbbox((x1, y1), label, font=font)
+        text_h = text_bbox[3] - text_bbox[1]
+        draw.rectangle(
+            [x1, y1 - text_h - 8, text_bbox[2], y1],
+            fill=(0, 255, 0),
         )
 
-        cv2.putText(
-            annotated,
-            label,
-            (x1, y1 - baseline - 3),
-            font,
-            font_scale,
-            (0, 0, 0),
-            thickness,
-        )
+        # Label text
+        draw.text((x1, y1 - text_h - 5), label, fill=(0, 0, 0), font=font)
 
-    # Save as JPEG with quality 85 (convert RGB→BGR for OpenCV imwrite)
-    cv2.imwrite(str(output_path), cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    # Save as JPEG with quality 85
+    pil_image.save(str(output_path), "JPEG", quality=85)
     return output_path
