@@ -90,7 +90,7 @@ async def fix(request: FixRequest, db: AsyncSession = Depends(get_db)):
         # 2. Store user corrections as JSON text
         log.user_correction_json = json.dumps([fi.model_dump() for fi in request.fixItems])
         await db.commit()
-        return ApiResponse(data={"status": "success"})
+        return {"status": "success"}
     except Exception as e:
         logger.exception("Recognition fix failed: %s", e)
-        return ApiResponse(code=0, msg=str(e))
+        return {"status": "fail", "msg": str(e)}

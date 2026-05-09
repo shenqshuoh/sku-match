@@ -44,6 +44,7 @@ onnx = [
 
 [project.scripts]
 sku-match = "main:main"
+sku-match-api = "api.app:main"
 
 [tool.uv]
 conflicts = [
