@@ -20,6 +20,7 @@ async def start_embed_task(
     processor,
     image_storage,
     sku_name: str,
+    inference_executor,
 ) -> None:
     async def _run():
         try:
@@ -33,10 +34,12 @@ async def start_embed_task(
                     await session.commit()
 
             skipped_images: list[dict[str, str]] = []
+            loop = asyncio.get_event_loop()
 
             for idx, (url, media_id) in enumerate(zip(media_urls, media_ids), start=1):
                 local_path = await image_storage.download_image(url)
-                success = await asyncio.to_thread(
+                success = await loop.run_in_executor(
+                    inference_executor,
                     processor.process_and_add,
                     sku_id,
                     sku_name,

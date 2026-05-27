@@ -77,6 +77,7 @@ async def new_sku(request: SKUNewRequest, req: Request, db: AsyncSession = Depen
         processor=req.app.state.processor,
         image_storage=req.app.state.image_storage,
         sku_name=sku_name,
+        inference_executor=req.app.state.inference_executor,
     )
 
     # 5. Return identifiers
@@ -196,23 +197,42 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
             return err
         sku_name = sku.sku_name
         skipped_images: list[dict[str, str]] = []
+        loop = asyncio.get_event_loop()
+        executor = req.app.state.inference_executor
+
         for item in request.media:
             if item.mediaId:
                 continue
             media_id = uuid.uuid4().hex
-            media = SKUMedia(media_id=media_id, sku_id=request.skuId, media_url=item.mediaUrl, media_type="IMAGE")
-            db.add(media)
-            await db.commit()
-            downloaded_path = await req.app.state.image_storage.download_image(item.mediaUrl)
-            success = await asyncio.to_thread(
-                req.app.state.processor.process_and_add,
-                request.skuId,
-                sku_name,
-                media_id,
-                downloaded_path,
-            )
-            if not success:
+            downloaded_path = None
+            try:
+                # 1. Download image
+                downloaded_path = await req.app.state.image_storage.download_image(item.mediaUrl)
+                # 2. Embed on GPU (via dedicated inference executor)
+                success = await loop.run_in_executor(
+                    executor,
+                    req.app.state.processor.process_and_add,
+                    request.skuId,
+                    sku_name,
+                    media_id,
+                    downloaded_path,
+                )
+                # 3. Only commit SKUMedia row if embedding succeeded
+                if success:
+                    media = SKUMedia(
+                        media_id=media_id, sku_id=request.skuId,
+                        media_url=item.mediaUrl, media_type="IMAGE",
+                    )
+                    db.add(media)
+                    await db.commit()
+                else:
+                    skipped_images.append({"media_url": item.mediaUrl or ""})
+            except Exception:
+                logger.exception("Failed to process media %s", item.mediaUrl)
                 skipped_images.append({"media_url": item.mediaUrl or ""})
+            finally:
+                if downloaded_path:
+                    await req.app.state.image_storage.cleanup_download(downloaded_path)
         if skipped_images:
             return {"status": "fail", "skipped_images": skipped_images}
         return {"status": "success"}
