@@ -180,47 +180,50 @@ sku-match/
 ## COMMANDS
 
 ```bash
-# Setup
-source .venv/bin/activate
+# Setup (uv venv — no activate script, use .venv/bin/python directly)
+.venv/bin/python main.py
 
 # CLI: SKU matching mode (default)
-python main.py
+.venv/bin/python main.py
 
 # CLI: SKU matching with custom thresholds
-python main.py --conf 0.3 --match-conf 0.5 --match-concentration 0.0 --match-verbose
+.venv/bin/python main.py --conf 0.3 --match-conf 0.5 --match-concentration 0.0 --match-verbose
 
 # CLI: Custom models
-python main.py --det-model models/yoloe-26l-seg.pt --emb-model dinov2_vitb14
+.venv/bin/python main.py --det-model models/yoloe-26l-seg.pt --emb-model dinov2_vitb14
 
 # CLI: FP16 + ONNX mode (GPU only)
-python main.py --swap --onnx
+.venv/bin/python main.py --swap --onnx
 
 # CLI: Detection only mode
-python main.py --detection-only
+.venv/bin/python main.py --detection-only
 
 # API: Start server
-python -m api.app
+.venv/bin/python -m api.app
 
 # API: With debug/reload
-DEBUG=true python -m api.app
+DEBUG=true .venv/bin/python -m api.app
 
 # API: With Qiniu config
-QINIU_ACCESS_KEY=xxx QINIU_SECRET_KEY=xxx QINIU_BUCKET=xxx python -m api.app
+QINIU_ACCESS_KEY=xxx QINIU_SECRET_KEY=xxx QINIU_BUCKET=xxx .venv/bin/python -m api.app
 
 # Build Chroma index from reference images
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitb14
+.venv/bin/python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitb14
 
 # Build index with different embedding model
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vits14
+.venv/bin/python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vits14
 
 # Crop raw reference photos
-python scripts/crop_reference.py -r data/references_raw/ -o data/references/
+.venv/bin/python scripts/crop_reference.py -r data/references_raw/ -o data/references/
 
 # Export DINOv2 to ONNX
-python scripts/export_onnx.py --model dinov2_vits14
+.venv/bin/python scripts/export_onnx.py --model dinov2_vits14
 
 # Run smoke test
-python tests/test_detection.py
+.venv/bin/python tests/test_detection.py
+
+# Deploy: Sync to remote and restart
+./scripts/sync_remote.sh --restart
 
 # Linux: Install CJK font (required for Chinese text in annotations)
 apt-get install fonts-noto-cjk

@@ -1,13 +1,19 @@
+# uv-managed — auto-resolved on remote via `uv sync`
 .venv/
+
+# git
 .git/
+
+# auto-generated
 __pycache__/
-runs/
-chroma_data/
-models/
-data/
-index/
-results/
 *.pyc
-.DS_Store
 *.egg-info/
+.DS_Store
+
+# remote has its own state — don't overwrite
+chroma_data/
+data/
+results/
+runs/
+index/
 sku_match.db

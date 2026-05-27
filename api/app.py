@@ -161,7 +161,7 @@ app.include_router(system.router, prefix="/api/v1/system", tags=["system"],
 async def health():
     return {"status": "ok"}
 
-# Serve annotated result images
+# Serve annotated result images (public)
 results_path = Path(settings.RESULTS_DIR)
 results_path.mkdir(parents=True, exist_ok=True)
 app.mount("/results", StaticFiles(directory=str(results_path)), name="results")
