@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 from sqlalchemy import select, update
@@ -31,9 +32,11 @@ async def start_embed_task(
                     tj.status = "indexing"  # Not model training — building vector index from reference images
                     await session.commit()
 
+            skipped_images: list[dict[str, str]] = []
+
             for idx, (url, media_id) in enumerate(zip(media_urls, media_ids), start=1):
                 local_path = await image_storage.download_image(url)
-                await asyncio.to_thread(
+                success = await asyncio.to_thread(
                     processor.process_and_add,
                     sku_id,
                     sku_name,
@@ -41,6 +44,10 @@ async def start_embed_task(
                     local_path,
                 )
                 await image_storage.cleanup_download(local_path)
+
+                if not success:
+                    skipped_images.append({"media_url": url})
+
                 progress = int((idx / max(len(media_urls), 1)) * 100)
                 async with async_session() as session:
                     await session.execute(
@@ -50,18 +57,36 @@ async def start_embed_task(
                     )
                     await session.commit()
 
-            async with async_session() as session:
-                await session.execute(
-                    update(TrainJob)
-                    .where(TrainJob.train_job_id == train_job_id)
-                    .values(status="completed", progress=100)
-                )
-                await session.execute(
-                    update(SKU).where(SKU.sku_id == sku_id).values(train_status="SUCCESS")
-                )
-                await session.commit()
+            skipped_json = json.dumps(skipped_images) if skipped_images else None
 
-            logger.info("Indexing task completed: train_job_id=%s", train_job_id)
+            if skipped_images:
+                logger.warning(
+                    "Indexing task completed with %d/%d skipped images: train_job_id=%s",
+                    len(skipped_images), len(media_urls), train_job_id,
+                )
+                async with async_session() as session:
+                    await session.execute(
+                        update(TrainJob)
+                        .where(TrainJob.train_job_id == train_job_id)
+                        .values(status="failed", progress=100, skipped_images=skipped_json)
+                    )
+                    await session.execute(
+                        update(SKU).where(SKU.sku_id == sku_id).values(train_status="FAILED")
+                    )
+                    await session.commit()
+            else:
+                async with async_session() as session:
+                    await session.execute(
+                        update(TrainJob)
+                        .where(TrainJob.train_job_id == train_job_id)
+                        .values(status="completed", progress=100)
+                    )
+                    await session.execute(
+                        update(SKU).where(SKU.sku_id == sku_id).values(train_status="SUCCESS")
+                    )
+                    await session.commit()
+
+                logger.info("Indexing task completed: train_job_id=%s", train_job_id)
 
         except Exception:
             logger.exception("Indexing task failed: train_job_id=%s", train_job_id)

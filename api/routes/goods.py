@@ -138,8 +138,16 @@ async def enable_sku(request: SKUEnableRequest, req: Request, db: AsyncSession =
     return {"status": "success"}
 
 
+def _to_full_url(request: Request, path: str) -> str:
+    """Convert a relative path to a full URL using the request's base URL."""
+    if path.startswith(("http://", "https://")):
+        return path
+    base = str(request.base_url).rstrip("/")
+    return f"{base}{path}"
+
+
 @router.get("/sku/list")
-async def list_skus(page: int = 1, size: int = 20, keyword: str | None = None, db: AsyncSession = Depends(get_db)):
+async def list_skus(request: Request, page: int = 1, size: int = 20, keyword: str | None = None, db: AsyncSession = Depends(get_db)):
     offset = (page - 1) * size
     kw = f"%{keyword}%" if keyword else None
     base = select(SKU).options(selectinload(SKU.medias))
@@ -161,7 +169,7 @@ async def list_skus(page: int = 1, size: int = 20, keyword: str | None = None, d
                 "skuName": s.sku_name,
                 "trainStatus": s.train_status,
                 "medias": [
-                    {"mediaId": m.media_id, "mediaType": m.media_type, "mediaUrl": m.media_url}
+                    {"mediaId": m.media_id, "mediaType": m.media_type, "mediaUrl": _to_full_url(request, m.media_url)}
                     for m in s.medias
                 ],
             }
@@ -187,6 +195,7 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
         if err:
             return err
         sku_name = sku.sku_name
+        skipped_images: list[dict[str, str]] = []
         for item in request.media:
             if item.mediaId:
                 continue
@@ -195,13 +204,17 @@ async def manage_media(request: SKUMediaRequest, req: Request, db: AsyncSession 
             db.add(media)
             await db.commit()
             downloaded_path = await req.app.state.image_storage.download_image(item.mediaUrl)
-            await asyncio.to_thread(
+            success = await asyncio.to_thread(
                 req.app.state.processor.process_and_add,
                 request.skuId,
                 sku_name,
                 media_id,
                 downloaded_path,
             )
+            if not success:
+                skipped_images.append({"media_url": item.mediaUrl or ""})
+        if skipped_images:
+            return {"status": "fail", "skipped_images": skipped_images}
         return {"status": "success"}
     elif request.action == "delete":
         for item in request.media:

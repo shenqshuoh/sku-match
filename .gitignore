@@ -23,3 +23,6 @@ chroma_data/
 
 # Stale TorchScript files (but keep needed models in models/)
 /*.ts
+
+# Environment variables
+.env

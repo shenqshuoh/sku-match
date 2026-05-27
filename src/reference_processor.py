@@ -16,7 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 def select_best_detection(boxes, img_w: int, img_h: int) -> int | None:
-    """Select the best detection from results — prefers center, smallest containing box."""
+    """Select the best detection from results — smallest box that covers the image center.
+
+    Returns None if no box covers the center point (no fallback).
+    """
     if not boxes:
         return None
 
@@ -29,21 +32,10 @@ def select_best_detection(boxes, img_w: int, img_h: int) -> int | None:
             area = (x2 - x1) * (y2 - y1)
             candidates.append((i, area))
 
-    if candidates:
-        return min(candidates, key=lambda x: x[1])[0]
+    if not candidates:
+        return None
 
-    # Fall back to closest center
-    min_dist = float("inf")
-    min_idx = 0
-    for i, box in enumerate(boxes):
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
-        bx, by = (x1 + x2) / 2, (y1 + y2) / 2
-        dist_sq = (bx - cx) ** 2 + (by - cy) ** 2
-        if dist_sq < min_dist:
-            min_dist = dist_sq
-            min_idx = i
-
-    return min_idx
+    return min(candidates, key=lambda x: x[1])[0]
 
 
 class ReferenceProcessor:
@@ -120,24 +112,20 @@ class ReferenceProcessor:
     ) -> bool:
         """Full pipeline: crop → embed → add to index.
 
-        Falls back to embedding the full image if detection fails.
-        Returns True if successful.
+        Returns True if the image was successfully cropped and indexed.
+        Returns False if no detection covers the image center (image is skipped).
         """
         crop = self.crop_reference(image_path)
 
-        if crop is not None:
-            embedding = self.embedder.embed(crop)
-            logger.info("Cropped and embedded reference %s/%s", sku_id, media_id)
-        else:
-            # Fallback: embed the full image
-            image = Image.open(image_path).convert("RGB")
-            embedding = self.embedder.embed(image)
-            logger.info(
-                "No crop available, embedded full image for %s/%s", sku_id, media_id
+        if crop is None:
+            logger.warning(
+                "No center-covering detection for %s/%s — skipping", sku_id, media_id
             )
+            return False
 
+        embedding = self.embedder.embed(crop)
         self.indexer.add_reference(sku_id, sku_name, media_id, embedding, metadata)
-        logger.info("Added reference %s/%s to index", sku_id, media_id)
+        logger.info("Cropped, embedded and indexed reference %s/%s", sku_id, media_id)
         return True
 
     def build_from_directory(
@@ -189,10 +177,13 @@ class ReferenceProcessor:
                 crop = self.crop_reference(img_path)
                 if crop is not None:
                     crops.append(crop)
+                    batch_meta.append((sku_id, sku_id, f"{sku_id}__{total_added + len(batch_meta):04d}"))
                 else:
-                    # Fallback to full image
-                    crops.append(Image.open(img_path).convert("RGB"))
-                batch_meta.append((sku_id, sku_id, f"{sku_id}__{total_added + len(batch_meta):04d}"))
+                    logger.warning("Skipping reference image (no center-covering detection): %s", img_path)
+
+            if not crops:
+                logger.info("All images in batch %d-%d skipped", i + 1, min(i + batch_size, len(all_paths)))
+                continue
 
             embeddings = self.embedder.embed_batch(crops)
 
@@ -204,7 +195,7 @@ class ReferenceProcessor:
             ]
 
             self.indexer.collection.add(ids=ids, embeddings=emb_list, metadatas=metadatas)
-            total_added += len(batch)
+            total_added += len(crops)
             logger.info("Indexed batch %d-%d / %d", i + 1, min(i + batch_size, len(all_paths)), len(all_paths))
 
         self.indexer._cache_valid = False

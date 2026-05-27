@@ -95,7 +95,7 @@ api/
 | `sku` | id, sku_id (unique), sku_name, enabled, train_status, created_at |
 | `sku_media` | id, sku_id (FK), media_url, media_type (IMAGE/VIDEO), created_at |
 | `recognition_log` | id, task_id (unique), request_json, ai_result_json, user_correction_json, visual_image_path, created_at |
-| `train_job` | id, train_job_id (unique), sku_id (FK), status (pending/training/completed/failed), progress (0-100), estimated_time, created_at, updated_at |
+| `train_job` | id, train_job_id (unique), sku_id (FK), status (pending/training/completed/failed), progress (0-100), estimated_time, **skipped_images (JSON array of `{media_url: "..."}`)**, created_at, updated_at |
 
 #### Model Lifecycle
 
@@ -316,6 +316,7 @@ For single-server Linux: `asyncio.create_task` with task tracker dict. Store sta
 | Logging | Structured JSON logs, log rotation |
 | Static file serving | Serve result images via FastAPI `StaticFiles` or reverse proxy |
 | `.gitignore` | Add `chroma_data/` to ignore Chroma persistence directory |
+| **DB migration** | `skipped_images` column added to `train_job` table. On existing deployments, run: `sqlite3 sku_match.db "ALTER TABLE train_job ADD COLUMN skipped_images TEXT;"` (SQLAlchemy `create_all()` only adds columns for new tables, not existing ones) |
 
 ---
 
