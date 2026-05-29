@@ -1,17 +1,17 @@
-from pathlib import Path
 import logging
 import time
+from pathlib import Path
 
 import numpy as np
-import cv2
 import torch
 from PIL import Image
 from ultralytics import YOLOE
 
-from src.embedder import DINOv2Embedder, DINOv2Variant
-from src.image_utils import isolate_object, normalize_mask, save_crop, extract_binary_masks
-from src.indexer import SKUIndexer, concentration_score
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
+from src.core import parse_detections
+from src.embedder import DINOv2Embedder, DINOv2Variant
+from src.image_utils import save_crop
+from src.indexer import SKUIndexer, score_matches
 from src.types import Detection, SKUMatch
 from src.utils import detect_device, free_gpu_memory
 
@@ -79,25 +79,10 @@ class SKUMatcher:
                 all_results[img_idx] = ([], 0.0)
                 continue
 
-            # Pre-compute union of all masks for O(D) instead of O(D²) masking
-            all_masks = [d.mask for d in detections if d.mask is not None]
-            union_mask = None
-            if all_masks:
-                first_valid = all_masks[0]
-                union_mask = np.zeros_like(first_valid, dtype=np.uint8)
-                for m in all_masks:
-                    union_mask = cv2.bitwise_or(union_mask, normalize_mask(m))
-
             crops = []
             for det in detections:
                 x1, y1, x2, y2 = map(int, det.bbox)
-                # Exclusion = union minus own mask
-                exclusion = None
-                if union_mask is not None and det.mask is not None:
-                    own_uint8 = normalize_mask(det.mask)
-                    exclusion = cv2.bitwise_and(union_mask, cv2.bitwise_not(own_uint8))
-                isolated = isolate_object(img_array, det.mask, [exclusion] if exclusion is not None else None)
-                crop = Image.fromarray(isolated[y1:y2, x1:x2])
+                crop = Image.fromarray(img_array[y1:y2, x1:x2])
                 crops.append(crop)
 
             # Embed + search (chunked to avoid GPU OOM on low-VRAM devices)
@@ -108,34 +93,15 @@ class SKUMatcher:
             embeddings_arr = np.concatenate(all_embeddings, axis=0) if all_embeddings else np.empty((0, self.embedder.dim))
             search_results = self.indexer.search_batch(embeddings_arr)
 
-            # Build results
-            results = []
-            output_dir = output_dirs[img_idx] if output_dirs else None
-            for det, (distribution, rank_info), crop in zip(detections, search_results, crops):
-                ranked = sorted(distribution.items(), key=lambda x: x[1], reverse=True)
-                sku_id, confidence = ranked[0]
-                sku_name = self.indexer.get_sku_name(sku_id) or sku_id
-                # Concentration: fraction of top-10 probability mass held by #1 SKU
-                match_concentration = concentration_score(distribution, top_k=self.concentration_topk)
-                # Rank positions of top-2 vectors for matched SKU
-                positions = rank_info.get(sku_id, [])
-                top2_ranks = (positions[0], positions[1]) if len(positions) >= 2 else (positions[0], 0) if len(positions) == 1 else (0, 0)
-                match = SKUMatch(
-                    detection=det,
-                    sku_id=sku_id,
-                    sku_name=sku_name,
-                    match_score=confidence,
-                    match_concentration=match_concentration,
-                    top2_ranks=top2_ranks,
-                    sku_distribution=distribution,
-                )
-                results.append(match)
+            # Build results using shared scoring
+            results = score_matches(detections, search_results, self.indexer, self.concentration_topk)
 
-                if output_dir:
+            output_dir = output_dirs[img_idx] if output_dirs else None
+            if output_dir:
+                for crop_idx, (match, crop) in enumerate(zip(results, crops), start=1):
                     output_dir.mkdir(parents=True, exist_ok=True)
-                    is_match = confidence >= self.confidence_threshold and match_concentration >= self.concentration_threshold
-                    save_sku = sku_id if is_match else "unk"
-                    crop_idx = len(results)
+                    is_match = match.match_score >= self.confidence_threshold and match.match_concentration >= self.concentration_threshold
+                    save_sku = match.sku_id if is_match else "unk"
                     save_crop(crop, f"{img_path.stem}_{crop_idx:03d}_{save_sku}.jpg", output_dir)
 
             elapsed = time.perf_counter() - t0
@@ -165,22 +131,7 @@ class SKUMatcher:
 
             for j, result in enumerate(results):
                 img_idx = i + j
-                if result.boxes is None:
-                    continue
-
-                binary_masks = extract_binary_masks(result)
-                for box, mask in zip(result.boxes, binary_masks):
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    cls_id = int(box.cls[0])
-                    all_detections[img_idx].append(
-                        Detection(
-                            bbox=(x1, y1, x2, y2),
-                            confidence=float(box.conf[0]),
-                            class_name=BEVERAGE_CONTAINER_CLASSES[cls_id] if cls_id < len(BEVERAGE_CONTAINER_CLASSES) else str(cls_id),
-                            class_id=cls_id,
-                            mask=mask,
-                        )
-                    )
+                all_detections[img_idx] = parse_detections(result)
 
         return all_detections
 
@@ -221,7 +172,7 @@ class SKUMatcher:
         emb_device = "cpu" if swap_models and device != "cpu" else device
         embedder = DINOv2Embedder(model_name=emb_model, device=emb_device, use_onnx=use_onnx)
         indexer = SKUIndexer()
-        indexer.load(index_dir, emb_model)
+        indexer.init_collection(persist_dir=index_dir)
 
         detector = YOLOE(det_model)
         detector.set_classes(BEVERAGE_CONTAINER_CLASSES)

@@ -1,6 +1,8 @@
 """Reference image processing: detect, crop, embed, and index."""
 
 import logging
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -8,11 +10,18 @@ from PIL import Image
 from ultralytics import YOLOE
 
 from src.embedder import DINOv2Embedder
-from src.image_utils import extract_binary_masks, isolate_object
 from src.indexer import SKUIndexer
+from src.masking import extract_binary_masks, mask_background
 from src.utils import embedding_to_list
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ProcessResult:
+    """Result from process_and_add: success flag + optional masked crop temp file."""
+    success: bool
+    crop_path: Path | None = None  # Temp file containing the masked crop JPEG
 
 
 def select_best_detection(boxes, img_w: int, img_h: int) -> int | None:
@@ -48,7 +57,7 @@ class ReferenceProcessor:
         indexer: SKUIndexer,
         device: str = "cpu",
         det_conf: float = 0.25,
-        use_mask: bool = True,
+        use_mask: bool = False,
     ):
         self.detector = detector
         self.embedder = embedder
@@ -62,8 +71,11 @@ class ReferenceProcessor:
 
         Returns None if no detection is found.
         """
+        image = Image.open(image_path).convert("RGB")
+        image_np = np.array(image)
+
         results = self.detector.predict(
-            source=str(image_path),
+            source=image_np,
             device=self.device,
             conf=self.det_conf,
             retina_masks=False,
@@ -75,8 +87,6 @@ class ReferenceProcessor:
             logger.warning("No detections in reference image: %s", image_path)
             return None
 
-        image = Image.open(image_path).convert("RGB")
-        image_np = np.array(image)
         h, w = image_np.shape[:2]
 
         sel_idx = select_best_detection(result.boxes, w, h)
@@ -91,8 +101,8 @@ class ReferenceProcessor:
             binary_masks = extract_binary_masks(result)
             mask = binary_masks[sel_idx]
             other_masks = [m for j, m in enumerate(binary_masks) if j != sel_idx and m is not None]
-            isolated = isolate_object(image_np, mask, other_masks)
-            crop = Image.fromarray(isolated[y1:y2, x1:x2])
+            masked = mask_background(image_np, mask, exclude_masks=other_masks)
+            crop = Image.fromarray(masked[y1:y2, x1:x2])
         else:
             crop = image.crop((x1, y1, x2, y2))
 
@@ -109,11 +119,11 @@ class ReferenceProcessor:
         media_id: str,
         image_path: Path,
         metadata: dict | None = None,
-    ) -> bool:
-        """Full pipeline: crop → embed → add to index.
+    ) -> ProcessResult:
+        """Full pipeline: crop → embed → add to index → save crop to temp file.
 
-        Returns True if the image was successfully cropped and indexed.
-        Returns False if no detection covers the image center (image is skipped).
+        Returns ProcessResult with success flag and optional crop_path.
+        crop_path is a temp file that the caller should upload and then delete.
         """
         crop = self.crop_reference(image_path)
 
@@ -121,12 +131,18 @@ class ReferenceProcessor:
             logger.warning(
                 "No center-covering detection for %s/%s — skipping", sku_id, media_id
             )
-            return False
+            return ProcessResult(success=False)
 
         embedding = self.embedder.embed(crop)
         self.indexer.add_reference(sku_id, sku_name, media_id, embedding, metadata)
         logger.info("Cropped, embedded and indexed reference %s/%s", sku_id, media_id)
-        return True
+
+        # Save masked crop to temp file for Qiniu upload
+        with tempfile.NamedTemporaryFile(suffix=".jpg", prefix=f"crop_{sku_id}_{media_id}_", delete=False) as tmp:
+            crop_path = Path(tmp.name)
+        crop.save(crop_path, format="JPEG", quality=95)
+
+        return ProcessResult(success=True, crop_path=crop_path)
 
     def build_from_directory(
         self,
@@ -201,26 +217,3 @@ class ReferenceProcessor:
         self.indexer._cache_valid = False
         logger.info("Index built: %d vectors from %d SKUs", total_added, len({p[1] for p in all_paths}))
         return total_added
-
-    def delete_sku_references(self, sku_id: str) -> None:
-        self.indexer.delete_sku(sku_id)
-        logger.info("Deleted all references for SKU %s", sku_id)
-
-    def delete_media_reference(self, sku_id: str, media_id: str) -> None:
-        self.indexer.delete_media(sku_id, media_id)
-        logger.info("Deleted media %s/%s", sku_id, media_id)
-
-    def set_sku_enabled(self, sku_id: str, enabled: bool) -> None:
-        self.indexer.set_enabled(sku_id, enabled)
-        logger.info("SKU %s enabled=%s", sku_id, enabled)
-
-    def update_sku_name(self, sku_id: str, new_name: str) -> None:
-        results = self.indexer.collection.get(
-            where={"sku_id": sku_id}, include=["metadatas"]
-        )
-        if not results["ids"]:
-            return
-        updated = [{**m, "sku_name": new_name} for m in results["metadatas"]]
-        self.indexer.collection.update(ids=results["ids"], metadatas=updated)
-        self.indexer._cache_valid = False
-        logger.info("Updated sku_name to '%s' for SKU %s (%d vectors)", new_name, sku_id, len(results["ids"]))

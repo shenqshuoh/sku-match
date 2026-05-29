@@ -15,5 +15,6 @@ chroma_data/
 data/
 results/
 runs/
+test/
 index/
 sku_match.db

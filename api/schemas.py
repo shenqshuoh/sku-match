@@ -122,6 +122,7 @@ class DetectionItem(BaseModel):
     match_score: float
     match_concentration: float = 0.0
     sku_distribution: dict[str, float] | None = None
+    matched_vector_tags: list[dict[str, Any]] | None = None
 
 
 class DetectData(BaseModel):

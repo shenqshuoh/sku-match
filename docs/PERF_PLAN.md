@@ -1,7 +1,7 @@
 # Performance Improvement Plan
 
 **Created:** 2026-05-07
-**Updated:** 2026-05-09
+**Updated:** 2026-05-29
 **GPU:** NVIDIA L20-2Q, 2048 MiB VRAM
 
 ## Benchmarks
@@ -38,8 +38,8 @@ FP16 is ~1.8x faster than FP32. Default mode is PyTorch FP16.
 
 ### 4. Pass numpy array to YOLOE (avoid double image I/O) — MEDIUM ✅
 - **Status:** DONE
-- **Files:** `api/services/recognition.py`
-- **Change:** `source=image_np` instead of `source=str(image_path)` — image already loaded as numpy for mask processing
+- **Files:** `api/services/recognition.py`, `src/reference_processor.py`
+- **Change:** `source=image_np` instead of `source=str(image_path)` — image already loaded as numpy. Applied to both recognition service and reference processor (audit #20).
 
 ### 5. Pre-compute union mask O(D²)→O(D) — MEDIUM ✅
 - **Status:** DONE
@@ -104,3 +104,4 @@ Enable by setting `USE_ONNX=true` (env) or `--onnx` (CLI). No code changes neede
 | 2026-05-07 | Items 1-8 implemented | All done |
 | 2026-05-08 | Updated: #1 changed to model.half() approach, #7 marked not viable on 2GB GPU, benchmarks added | — |
 | 2026-05-09 | Updated: #2 expanded to all predict() calls, #7 noted optional dep group, added deferred items, GPU upgrade path | Current |
+| 2026-05-29 | Updated: #4 expanded to reference_processor.py, updated date | Current |

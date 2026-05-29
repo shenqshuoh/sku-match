@@ -58,7 +58,7 @@ class TrainJob(Base):
     status: Mapped[str] = mapped_column(String, default="pending")
     progress: Mapped[int] = mapped_column(Integer, default=0)
     estimated_time: Mapped[str | None] = mapped_column(String, nullable=True)
-    skipped_images: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of {"media_url": "..."}
+    embedding_failed: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of failed media URLs
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
 

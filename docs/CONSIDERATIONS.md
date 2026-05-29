@@ -157,7 +157,7 @@ Evaluated additions to the beverage-cashier pipeline. Updated as new options are
 | No local disk management | Adds latency for upload (~200ms) |
 | CDN-cacheable URLs for client | Configuration complexity (token endpoint, region) |
 
-**Implementation**: `api/services/image_storage.py` — `upload_to_qiniu()` method with token caching. Region: South China (z2). Key format: `sku-match/{YYYY-MM/DD}/{filename}`. Falls back to local path on upload failure. Configured via `QINIU_TOKEN_URL`, `QINIU_UPLOAD_URL`, `QINIU_DOMAIN`, `QINIU_KEY_PREFIX` env vars.
+**Implementation**: `api/services/image_storage.py` — `upload_to_qiniu()` method with token caching. Region: South China (z2). Key format: `sku-match/{YYYY-MM/DD}/{filename}`. Falls back to local path on upload failure (sets `qiniu_upload_failed: true` flag in response). Configured via `QINIU_TOKEN_URL`, `QINIU_UPLOAD_URL`, `QINIU_DOMAIN`, `QINIU_KEY_PREFIX` env vars. Annotated images older than `RESULTS_MAX_AGE_HOURS` (default 24h) are cleaned up by a background task.
 
 ---
 
@@ -174,4 +174,4 @@ Evaluated additions to the beverage-cashier pipeline. Updated as new options are
 
 ---
 
-*Last updated: 2026-05-09*
+*Last updated: 2026-05-29*

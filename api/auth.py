@@ -1,5 +1,6 @@
 """API authentication and rate limiting dependencies."""
 
+import asyncio
 import time
 import logging
 from collections import defaultdict
@@ -25,6 +26,7 @@ async def verify_api_key(x_api_key: str | None = Header(None, alias="X-API-Key")
 
 _window_secs: int = 60
 _client_requests: dict[str, list[float]] = defaultdict(list)
+_rate_limit_lock = asyncio.Lock()
 
 
 async def check_rate_limit(request: Request) -> None:
@@ -34,9 +36,16 @@ async def check_rate_limit(request: Request) -> None:
         return
     client_ip = request.client.host if request.client else "0.0.0.0"
     now = time.time()
-    timestamps = _client_requests[client_ip]
-    # Prune expired entries
-    _client_requests[client_ip] = [t for t in timestamps if now - t < _window_secs]
-    if len(_client_requests[client_ip]) >= limit:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    _client_requests[client_ip].append(now)
+    async with _rate_limit_lock:
+        # Prune expired entries
+        timestamps = [t for t in _client_requests[client_ip] if now - t < _window_secs]
+        if len(timestamps) >= limit:
+            _client_requests[client_ip] = timestamps
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        timestamps.append(now)
+        _client_requests[client_ip] = timestamps
+        # Prune IPs with no recent requests to prevent unbounded memory growth
+        if len(_client_requests) > 1000:
+            empty_ips = [ip for ip, ts in _client_requests.items() if not ts]
+            for ip in empty_ips:
+                del _client_requests[ip]

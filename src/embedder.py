@@ -1,8 +1,5 @@
-import ssl
-import warnings
-import sys
 import logging
-logger = logging.getLogger(__name__)
+import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -11,7 +8,9 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
-from src.utils import detect_device, disable_ssl_verification
+from src.utils import detect_device
+
+logger = logging.getLogger(__name__)
 
 DINOv2Variant = Literal["dinov2_vits14", "dinov2_vitb14", "dinov2_vitl14"]
 DIMENSIONS = {
@@ -84,14 +83,9 @@ class DINOv2Embedder:
                 )
                 self.model.load_state_dict(state_dict, strict=True)
             else:
-                # Fallback: download from internet (requires network)
-                if sys.platform == "darwin":
-                    disable_ssl_verification()
-                self.model = torch.hub.load(
-                    str(_vendor_dir),
-                    model_name,
-                    source="local",
-                    trust_repo=True,
+                raise FileNotFoundError(
+                    f"DINOv2 weights not found: {_weight_path}\n"
+                    f"Ensure model weights are synced to the models/ directory."
                 )
             self.model.eval()
             self.model.to(device)

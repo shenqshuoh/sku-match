@@ -4,8 +4,42 @@ from pathlib import Path
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
-from src.image_utils import process_detection_crops, extract_binary_masks
+from src.image_utils import process_detection_crops
+from src.masking import extract_binary_masks
+from src.types import Detection
 from src.utils import detect_device, free_gpu_memory
+
+
+def parse_detections(result) -> list[Detection]:
+    """Parse YOLOE prediction result into Detection dataclasses.
+
+    Args:
+        result: YOLOE prediction result (single image)
+
+    Returns:
+        List of Detection with bbox, confidence, class info.
+    """
+    if result.boxes is None or len(result.boxes) == 0:
+        return []
+
+    detections = []
+    for box in result.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        cls_id = int(box.cls[0])
+        class_name = (
+            BEVERAGE_CONTAINER_CLASSES[cls_id]
+            if cls_id < len(BEVERAGE_CONTAINER_CLASSES)
+            else str(cls_id)
+        )
+        detections.append(
+            Detection(
+                bbox=(x1, y1, x2, y2),
+                confidence=float(box.conf[0]),
+                class_name=class_name,
+                class_id=cls_id,
+            )
+        )
+    return detections
 
 
 def detect(
@@ -71,15 +105,14 @@ def _save_result(result, output_dir: Path, crops_dir: Path) -> None:
         json.dump(preds, f, indent=2)
 
     if result.masks is not None:
-        boxes = [box.xyxy[0].tolist() for box in result.boxes]
+        detections = parse_detections(result)
         masks = extract_binary_masks(result)
-        class_names = [BEVERAGE_CONTAINER_CLASSES[int(box.cls[0])] for box in result.boxes]
 
         process_detection_crops(
             img=result.orig_img,
-            boxes=boxes,
+            boxes=[det.bbox for det in detections],
             masks=masks,
-            class_names=class_names,
+            class_names=[det.class_name for det in detections],
             output_dir=crops_dir,
             image_name=img_name,
             exclude_other_masks=True,

@@ -5,14 +5,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-import cv2
 from PIL import Image
 from ultralytics import YOLOE
 
-from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
+from src.core import parse_detections
 from src.embedder import DINOv2Embedder
-from src.image_utils import draw_annotations, extract_binary_masks, isolate_object
-from src.indexer import SKUIndexer, concentration_score
+from src.image_utils import draw_annotations
+from src.indexer import SKUIndexer, score_matches
 
 if TYPE_CHECKING:
     from api.services.image_storage import ImageStorage
@@ -62,65 +61,18 @@ class RecognitionService:
         )
         result = results[0]
 
-        if result.boxes is None or len(result.boxes) == 0:
-            annotated_path = self.image_storage.get_result_path(task_id)
-            draw_annotations(image_np, [], annotated_path)
-            return {
-                "counts": {},
-                "detections": [],
-                "matched_image": self.image_storage.get_result_url(task_id),
-                "taskId": task_id,
-            }
+        detections = parse_detections(result)
 
-        binary_masks = extract_binary_masks(result)
-        all_masks = binary_masks
-
-        detections = []
-        for i, (box, mask) in enumerate(zip(result.boxes, binary_masks)):
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            cls_id = int(box.cls[0])
-            class_name = BEVERAGE_CONTAINER_CLASSES[cls_id] if cls_id < len(BEVERAGE_CONTAINER_CLASSES) else str(cls_id)
-
-            detections.append({
-                "bbox": [x1, y1, x2, y2],
-                "confidence": float(box.conf[0]),
-                "class_name": class_name,
-                "class_id": cls_id,
-                "mask": mask,
-            })
-
-        if roi_rect is not None:
+        # Apply ROI filter if specified
+        if roi_rect is not None and detections:
             rx1, ry1, rx2, ry2 = roi_rect
             detections = [
                 d for d in detections
-                if rx1 <= (d["bbox"][0] + d["bbox"][2]) / 2 <= rx2
-                and ry1 <= (d["bbox"][1] + d["bbox"][3]) / 2 <= ry2
+                if rx1 <= (d.bbox[0] + d.bbox[2]) / 2 <= rx2
+                and ry1 <= (d.bbox[1] + d.bbox[3]) / 2 <= ry2
             ]
 
-        # Pre-compute union of all masks for O(D) instead of O(D²) masking
-        union_mask = None
-        if all_masks and any(m is not None for m in all_masks):
-            first_valid = next(m for m in all_masks if m is not None)
-            union_mask = np.zeros_like(first_valid, dtype=np.uint8)
-            for m in all_masks:
-                if m is not None:
-                    m_uint8 = (m * 255).astype(np.uint8) if m.max() <= 1 else m.astype(np.uint8)
-                    union_mask = cv2.bitwise_or(union_mask, m_uint8)
-
-        crops = []
-        for idx, det in enumerate(detections):
-            x1, y1, x2, y2 = map(int, det["bbox"])
-            # Exclusion = union minus own mask
-            exclusion = None
-            if union_mask is not None and det["mask"] is not None:
-                own_mask = det["mask"]
-                own_uint8 = (own_mask * 255).astype(np.uint8) if own_mask.max() <= 1 else own_mask.astype(np.uint8)
-                exclusion = cv2.bitwise_and(union_mask, cv2.bitwise_not(own_uint8))
-            isolated = isolate_object(image_np, det["mask"], [exclusion] if exclusion is not None else None)
-            crop = Image.fromarray(isolated[y1:y2, x1:x2])
-            crops.append(crop)
-
-        if not crops:
+        if not detections:
             annotated_path = self.image_storage.get_result_path(task_id)
             draw_annotations(image_np, [], annotated_path)
             return {
@@ -130,28 +82,57 @@ class RecognitionService:
                 "taskId": task_id,
             }
 
+        # Crop detections from image
+        crops = []
+        for det in detections:
+            x1, y1, x2, y2 = map(int, det.bbox)
+            crop = Image.fromarray(image_np[y1:y2, x1:x2])
+            crops.append(crop)
+
+        # Embed + search + score using shared pipeline
         embeddings = self.embedder.embed_batch(crops)
         search_results = self.indexer.search_batch(embeddings)
+        matches = score_matches(detections, search_results, self.indexer, self.concentration_topk)
 
+        # Format results with API-specific threshold filtering
         counts: dict[str, int] = {}
         detection_items = []
-        for i, (det, (distribution, _rank_info)) in enumerate(zip(detections, search_results), start=1):
-            ranked = sorted(distribution.items(), key=lambda x: x[1], reverse=True)
-            sku_id, confidence = ranked[0]
-            sku_name = self.indexer.get_sku_name(sku_id) or sku_id
-            match_concentration = concentration_score(distribution, top_k=self.concentration_topk)
-            counts[sku_id] = counts.get(sku_id, 0) + 1
+        for i, match in enumerate(matches, start=1):
+            sku_id = match.sku_id
+            confidence = match.match_score
+
+            if confidence < self.match_conf:
+                sku_id = ""
+                sku_name = ""
+                confidence = 0.0
+                match_concentration = 0.0
+                matched_vector_tags = []
+            else:
+                sku_name = match.sku_name
+                match_concentration = match.match_concentration
+                matched_vector_tags = [
+                    {"skuId": vm.sku_id, "score": round(vm.similarity, 6), "mediaUrl": vm.media_url}
+                    for vm in (match.top_vectors or [])[:20]
+                ]
+
+            if sku_id:
+                counts[sku_id] = counts.get(sku_id, 0) + 1
+
+            ranked = sorted((match.sku_distribution or {}).items(), key=lambda x: x[1], reverse=True)
+            top5_distribution = dict(ranked[:5]) if confidence >= self.match_conf else {}
+
             detection_items.append({
                 "itemId": i,
-                "bbox": det["bbox"],
-                "class_id": det["class_id"],
-                "class_name": det["class_name"],
-                "detection_conf": det["confidence"],
+                "bbox": list(match.detection.bbox),
+                "class_id": match.detection.class_id,
+                "class_name": match.detection.class_name,
+                "detection_conf": match.detection.confidence,
                 "sku_id": sku_id,
                 "sku_name": sku_name,
                 "match_score": confidence,
                 "match_concentration": match_concentration,
-                "sku_distribution": distribution,
+                "sku_distribution": top5_distribution,
+                "matched_vector_tags": matched_vector_tags,
             })
 
         annotated_path = self.image_storage.get_result_path(task_id)

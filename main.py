@@ -13,9 +13,6 @@ from src.reference_processor import ReferenceProcessor
 from src.types import SKUMatch
 from src.utils import configure_ultralytics_weights
 
-# Ensure ultralytics finds local model weights (mobileclip2_b.ts) without GitHub download
-configure_ultralytics_weights()
-
 
 def get_next_match_dir(base_dir: Path = Path("runs/match")) -> Path:
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +242,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Ensure ultralytics finds local model weights (mobileclip2_b.ts) without GitHub download
+    configure_ultralytics_weights()
 
     if args.detection_only:
         run_detection(args)

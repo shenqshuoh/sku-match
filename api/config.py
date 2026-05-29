@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     DOWNLOAD_TIMEOUT: int = 30
+    RESULTS_MAX_AGE_HOURS: int = 24  # Annotated images older than this are cleaned up
 
     API_KEY: str = ""  # Empty = auth disabled
     RATE_LIMIT: int = 0  # Requests per minute per IP; 0 = disabled
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     QINIU_TOKEN_URL: str = "http://172.16.88.119:12001/api/qiniu/token/vr"
     QINIU_UPLOAD_URL: str = "https://upload-z2.qiniup.com"
     QINIU_DOMAIN: str = "https://vr.jihaihotpot.com/"
+    QINIU_IOVIP_URL: str = "http://iovip-z2.qiniuio.com"
     QINIU_KEY_PREFIX: str = "sku-match/"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")

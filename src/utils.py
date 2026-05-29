@@ -3,6 +3,7 @@
 import gc
 from pathlib import Path
 
+import numpy as np
 import torch
 
 # Ultralytics text model weights (mobileclip2_b.ts) are stored in models/
@@ -12,12 +13,9 @@ _MODELS_DIR = str(Path(__file__).resolve().parent.parent / "models")
 
 def configure_ultralytics_weights() -> None:
     """Set ultralytics weights_dir to local models/ to avoid GitHub downloads."""
-    try:
-        from ultralytics import settings
+    from ultralytics import settings
 
-        settings.update({"weights_dir": _MODELS_DIR})
-    except Exception:
-        pass
+    settings.update({"weights_dir": _MODELS_DIR})
 
 
 def detect_device() -> str:
@@ -36,13 +34,6 @@ def free_gpu_memory() -> None:
         torch.cuda.empty_cache()
 
 
-def disable_ssl_verification() -> None:
-    """Disable SSL certificate verification (macOS compatibility fallback)."""
-    import ssl
-    ssl._create_default_https_context = ssl._create_unverified_context
-
-
 def embedding_to_list(emb) -> list:
     """Convert numpy array or array-like to a plain Python list for Chroma."""
-    import numpy as np
     return emb.tolist() if isinstance(emb, np.ndarray) else list(emb)

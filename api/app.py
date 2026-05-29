@@ -1,3 +1,4 @@
+import asyncio
 import concurrent.futures
 import json
 import logging
@@ -23,9 +24,6 @@ from src.reference_processor import ReferenceProcessor
 from src.utils import configure_ultralytics_weights
 from src.utils import detect_device as _detect_device
 
-# Ensure ultralytics finds local model weights (mobileclip2_b.ts) without GitHub download
-configure_ultralytics_weights()
-
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -43,6 +41,9 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up — device=%s", device)
 
     await init_db()
+
+    # Ensure ultralytics finds local model weights (mobileclip2_b.ts) without GitHub download
+    configure_ultralytics_weights()
 
     # Load ML models
     logger.info("Loading YOLOE detector: %s", settings.DET_MODEL)
@@ -85,6 +86,7 @@ async def lifespan(app: FastAPI):
         qiniu_token_url=settings.QINIU_TOKEN_URL,
         qiniu_upload_url=settings.QINIU_UPLOAD_URL,
         qiniu_domain=settings.QINIU_DOMAIN,
+        qiniu_iovip_url=settings.QINIU_IOVIP_URL,
         qiniu_key_prefix=settings.QINIU_KEY_PREFIX,
     )
     processor = ReferenceProcessor(
@@ -121,7 +123,38 @@ async def lifespan(app: FastAPI):
 
     logger.info("Startup complete")
 
+    # Background task: periodically clean up old annotated images
+    cleanup_stop = asyncio.Event()
+    app.state._cleanup_stop = cleanup_stop
+
+    async def _results_cleanup_loop():
+        while not cleanup_stop.is_set():
+            try:
+                await asyncio.wait_for(cleanup_stop.wait(), timeout=3600)
+            except asyncio.TimeoutError:
+                pass  # timeout means it's time to run cleanup
+            if cleanup_stop.is_set():
+                break
+            try:
+                await asyncio.to_thread(
+                    image_storage.cleanup_old_results,
+                    settings.RESULTS_MAX_AGE_HOURS,
+                )
+            except Exception:
+                logger.exception("Failed to clean up old annotated images")
+
+    cleanup_task = asyncio.create_task(_results_cleanup_loop())
+    app.state._cleanup_task = cleanup_task
+
     yield
+
+    # Stop cleanup task
+    cleanup_stop.set()
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
 
     logger.info("Shutting down")
     try:

@@ -19,6 +19,7 @@ class ImageStorage:
         qiniu_token_url: str = "",
         qiniu_upload_url: str = "https://upload.qiniup.com",
         qiniu_domain: str = "",
+        qiniu_iovip_url: str = "",
         qiniu_key_prefix: str = "",
     ):
         self.results_dir = Path(results_dir)
@@ -27,9 +28,28 @@ class ImageStorage:
         self.qiniu_token_url = qiniu_token_url
         self.qiniu_upload_url = qiniu_upload_url
         self.qiniu_domain = qiniu_domain.rstrip("/") + "/" if qiniu_domain else ""
+        self.qiniu_iovip_url = qiniu_iovip_url.rstrip("/") if qiniu_iovip_url else ""
         self.qiniu_key_prefix = qiniu_key_prefix
         self._qiniu_token: str = ""
         self._qiniu_token_deadline: float = 0
+
+    def cleanup_old_results(self, max_age_hours: int = 24) -> int:
+        """Delete annotated images older than max_age_hours. Returns count of deleted files."""
+        annotated_dir = self.results_dir / "annotated"
+        if not annotated_dir.exists():
+            return 0
+        cutoff = time.time() - max_age_hours * 3600
+        deleted = 0
+        for f in annotated_dir.iterdir():
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                try:
+                    f.unlink()
+                    deleted += 1
+                except Exception:
+                    logger.warning("Failed to delete old annotated image: %s", f, exc_info=True)
+        if deleted:
+            logger.info("Cleaned up %d annotated images older than %dh", deleted, max_age_hours)
+        return deleted
 
     async def download_image(self, url: str) -> Path:
         downloads_dir = self.results_dir / "downloads"
@@ -48,8 +68,16 @@ class ImageStorage:
         local_path = downloads_dir / f"{uuid4()}{ext}"
 
         try:
+            # Rewrite Qiniu CDN URLs to origin storage domain for faster domestic access
+            download_url = url
+            headers: dict[str, str] = {}
+            if self.qiniu_iovip_url and self.qiniu_domain and url.startswith(self.qiniu_domain):
+                key = url[len(self.qiniu_domain):]
+                download_url = f"{self.qiniu_iovip_url}/{key}"
+                headers["Host"] = urlparse(self.qiniu_domain).netloc
+
             async with httpx.AsyncClient(timeout=self.download_timeout) as client:
-                resp = await client.get(url)
+                resp = await client.get(download_url, headers=headers or None)
                 resp.raise_for_status()
                 local_path.write_bytes(resp.content)
             logger.info("Downloaded %s -> %s", url, local_path)

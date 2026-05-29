@@ -253,3 +253,4 @@ Generated: 2026-05-07
 | 2026-05-07 | Completed items 9.1–9.4: ReferenceProcessor, softmax scoring, match ratio, det_conf, embedding model research |
 | 2026-05-08 | Completed items 10.1–10.10: FP16, retina_masks fix, GPU thread pool, numpy array, union mask, warm-up, ONNX (behind flag), JPEG quality, vits14 default, DINOv2 vendoring |
 | 2026-05-08 | Replaced match_ratio with concentration_score (item 9.3) |
+| 2026-05-29 | Plan complete — all items done. Further improvements tracked in `docs/PLAN.md` (roadmap) and `docs/AUDIT.md` (issues). |

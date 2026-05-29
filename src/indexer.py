@@ -6,18 +6,32 @@ of reference embeddings without full index rebuilds.
 """
 
 import logging
-import sys
 from pathlib import Path
 
 import chromadb
 import numpy as np
 
-from src.types import SKUReference
-from src.utils import disable_ssl_verification, embedding_to_list
+from src.types import Detection, SKUMatch, SKUReference
+from src.utils import embedding_to_list
 
 EPSILON = 1e-8
 
 logger = logging.getLogger(__name__)
+
+
+class VectorMatch:
+    """A single vector-level match result from similarity search."""
+
+    __slots__ = ("sku_id", "sku_name", "similarity", "rank", "media_url")
+
+    def __init__(
+        self, sku_id: str, sku_name: str, similarity: float, rank: int, media_url: str
+    ) -> None:
+        self.sku_id = sku_id
+        self.sku_name = sku_name
+        self.similarity = similarity
+        self.rank = rank
+        self.media_url = media_url
 
 COLLECTION_NAME = "sku_embeddings"
 
@@ -44,6 +58,55 @@ def concentration_score(distribution: dict[str, float], top_k: int = 10) -> floa
     if len(top_scores) < 2 or top_scores[0] == 0:
         return 0.0
     return top_scores[0] / sum(top_scores)
+
+
+def score_matches(
+    detections: list[Detection],
+    search_results: list[tuple[dict[str, float], dict[str, list[int]], list[VectorMatch]]],
+    indexer: "SKUIndexer",
+    concentration_topk: int = 10,
+) -> list[SKUMatch]:
+    """Score detection crops against the SKU index.
+
+    For each detection, takes the top-1 SKU from the softmax distribution
+    and computes concentration score and rank positions.
+
+    Args:
+        detections: Parsed detection results (from parse_detections).
+        search_results: Output from SKUIndexer.search_batch().
+        indexer: SKU index for name lookups.
+        concentration_topk: K for concentration score computation.
+
+    Returns:
+        List of SKUMatch with scored results. No threshold filtering is applied;
+        callers should filter by match_score themselves.
+    """
+    matches = []
+    for det, (distribution, rank_info, top_vectors) in zip(detections, search_results):
+        ranked = sorted(distribution.items(), key=lambda x: x[1], reverse=True)
+        sku_id, confidence = ranked[0]
+        sku_name = indexer.get_sku_name(sku_id) or sku_id
+        conc = concentration_score(distribution, top_k=concentration_topk)
+
+        positions = rank_info.get(sku_id, [])
+        top2_ranks = (
+            (positions[0], positions[1]) if len(positions) >= 2
+            else (positions[0], 0) if len(positions) == 1
+            else (0, 0)
+        )
+
+        matches.append(SKUMatch(
+            detection=det,
+            sku_id=sku_id,
+            sku_name=sku_name,
+            match_score=confidence,
+            match_concentration=conc,
+            top2_ranks=top2_ranks,
+            sku_distribution=distribution,
+            top_vectors=top_vectors,
+        ))
+
+    return matches
 
 
 class SKUIndexer:
@@ -77,9 +140,6 @@ class SKUIndexer:
         return self._collection
 
     def init_collection(self, persist_dir: str | Path | None = None) -> None:
-        if sys.platform == "darwin":
-            disable_ssl_verification()
-
         dir_path = Path(persist_dir) if persist_dir else self._persist_dir or Path("chroma_data")
         dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -173,13 +233,25 @@ class SKUIndexer:
         self._cache_valid = False
         logger.info("Set SKU %s enabled=%s", sku_id, enabled)
 
+    def update_sku_name(self, sku_id: str, new_name: str) -> None:
+        """Update the sku_name metadata for all vectors of a given SKU."""
+        results = self.collection.get(
+            where={"sku_id": sku_id}, include=["metadatas"]
+        )
+        if not results["ids"]:
+            return
+        updated = [{**m, "sku_name": new_name} for m in results["metadatas"]]
+        self.collection.update(ids=results["ids"], metadatas=updated)
+        self._cache_valid = False
+        logger.info("Updated sku_name to '%s' for SKU %s (%d vectors)", new_name, sku_id, len(results["ids"]))
+
     def search(self, query_embedding: np.ndarray) -> tuple[dict[str, float], dict[str, list[int]]]:
         results = self.search_batch(query_embedding.reshape(1, -1))
         return results[0]
 
     def search_batch(
         self, query_embeddings: np.ndarray
-    ) -> list[tuple[dict[str, float], dict[str, list[int]]]]:
+    ) -> list[tuple[dict[str, float], dict[str, list[int]], list[VectorMatch]]]:
         """Match detection crops using top-2-per-SKU scoring with softmax normalization.
 
         Algorithm: for each query, fetch top-N results from Chroma (cosine distance),
@@ -188,10 +260,12 @@ class SKUIndexer:
         over all enabled SKUs. Unranked SKUs receive a small epsilon score.
 
         Returns:
-            List of (distribution, rank_positions) tuples where:
+            List of (distribution, rank_positions, top_vectors) tuples where:
               - distribution: dict mapping sku_id → softmax probability (sums to 1.0)
               - rank_positions: dict mapping sku_id → list of 1-indexed rank positions
                 of the SKU's top-2 vectors in the overall Chroma result list
+              - top_vectors: list of VectorMatch for each raw vector returned by Chroma,
+                sorted by similarity descending
         """
         if self.collection.count() == 0:
             raise RuntimeError("Index is empty — no reference embeddings")
@@ -211,7 +285,7 @@ class SKUIndexer:
             include=["metadatas", "distances"],
         )
 
-        matches: list[tuple[dict[str, float], dict[str, list[int]]]] = []
+        matches: list[tuple[dict[str, float], dict[str, list[int]], list[VectorMatch]]] = []
 
         for crop_idx in range(len(query_list)):
             sku_scores: dict[str, list[float]] = {}
@@ -219,11 +293,18 @@ class SKUIndexer:
             metas = results["metadatas"][crop_idx]
             dists = results["distances"][crop_idx]
 
+            # Build raw vector-level match list
+            top_vectors: list[VectorMatch] = []
             for rank, (meta, distance) in enumerate(zip(metas, dists)):
                 similarity = COSINE_DISTANCE_TO_SIMILARITY - distance
                 sku_id = meta["sku_id"]
+                sku_name = meta.get("sku_name", sku_id)
+                media_url = meta.get("media_url", "")
+                top_vectors.append(VectorMatch(sku_id, sku_name, similarity, rank + 1, media_url))
                 sku_scores.setdefault(sku_id, []).append(similarity)
                 sku_positions.setdefault(sku_id, []).append(rank + 1)  # 1-indexed
+
+            # Already sorted by Chroma by distance ascending = similarity descending
 
             # Track top-2 rank positions per SKU
             rank_info: dict[str, list[int]] = {}
@@ -247,7 +328,7 @@ class SKUIndexer:
 
             # Softmax normalization
             probs = _softmax(raw_scores, self._temperature)
-            matches.append((probs, rank_info))
+            matches.append((probs, rank_info, top_vectors))
 
         return matches
 
@@ -255,9 +336,6 @@ class SKUIndexer:
         if not self._cache_valid:
             self._refresh_cache()
         return self._sku_name_cache.get(sku_id)
-
-    def load(self, directory: Path, model_name: str) -> None:
-        self.init_collection(persist_dir=directory)
 
     def _get_n_results_size(self) -> int:
         if not self._cache_valid:

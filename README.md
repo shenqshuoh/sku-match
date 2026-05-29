@@ -189,11 +189,12 @@ python tests/test_detection.py
 |----------|-------------|
 | [docs/SETUP.md](docs/SETUP.md) | Environment setup guide |
 | [docs/API_GUIDE.md](docs/API_GUIDE.md) | API authentication, quick test, endpoint reference |
-| [docs/API.md](docs/API.md) | Chinese requirements spec (source of truth) |
-| [docs/PLAN.md](docs/PLAN.md) | Implementation plan (completed) |
+| [docs/API.md.bak](docs/API.md.bak) | Initial Chinese requirements draft (archived) |
+| [docs/PLAN.md](docs/PLAN.md) | Roadmap and future plans |
+| [docs/AUDIT.md](docs/AUDIT.md) | Audit findings and issue tracker |
 | [docs/PERF_PLAN.md](docs/PERF_PLAN.md) | Performance optimization notes |
 | [docs/CONSIDERATIONS.md](docs/CONSIDERATIONS.md) | Evaluated improvements |
-| [docs/CLEANUP_PLAN.md](docs/CLEANUP_PLAN.md) | Cleanup history |
+| [docs/CLEANUP_PLAN.md](docs/CLEANUP_PLAN.md) | Cleanup history (complete) |
 
 ## Notes
 

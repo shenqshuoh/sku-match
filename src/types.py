@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -30,4 +30,4 @@ class SKUMatch:
     match_concentration: float = 0.0
     top2_ranks: tuple[int, int] = (0, 0)
     sku_distribution: dict[str, float] | None = None
-    crop_path: Path | None = None
+    top_vectors: list | None = field(default=None, repr=False)
