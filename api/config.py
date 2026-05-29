@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     DET_CONF: float = 0.25
     IMGSZ: int = 1280
-    MATCH_CONF: float = 0.5
+    MATCH_CONF: float = 0
     CONCENTRATION_TOPK: int = 10
     USE_ONNX: bool = False
 

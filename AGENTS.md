@@ -17,19 +17,18 @@ sku-match/
 ├── uv.lock                   # uv lockfile
 ├── .env                      # Environment variables
 ├── src/
-│   ├── __init__.py           # Exports: detect, DINOv2Embedder, SKUIndexer, SKUMatcher, etc.
-│   ├── core.py               # CLI detection: detect(), _save_result()
+│   ├── __init__.py           # Empty (no re-exports)
+│   ├── core.py               # CLI detection: detect(), parse_detections(), _save_result()
 │   ├── embedder.py           # DINOv2Embedder: auto device detect, FP16 on CUDA, optional ONNX backend
-│   ├── indexer.py            # Chroma-backed SKUIndexer: build, add/delete/enable/search
+│   ├── indexer.py            # Chroma-backed SKUIndexer + score_matches(): build, add/delete/enable/search
 │   ├── matcher.py            # SKUMatcher: detection + SKU matching pipeline
-│   ├── types.py              # Dataclasses: Detection, SKUReference, SKUMatch, VectorMatch
-│   ├── utils.py              # Shared: detect_device(), free_gpu_memory(), disable_ssl_verification(), embedding_to_list(), configure_ultralytics_weights()
+│   ├── types.py              # Dataclasses: Detection, SKUReference, SKUMatch
+│   ├── utils.py              # Shared: detect_device(), free_gpu_memory(), embedding_to_list(), configure_ultralytics_weights()
+│   ├── masking.py            # Mask extraction + configurable background masking (ImageNet mean default)
 │   ├── reference_processor.py # ReferenceProcessor: crop→embed→index pipeline
-│   ├── image_utils.py        # isolate_object, save_crop, process_detection_crops, draw_annotations, CJK font rendering via PIL (Noto Sans CJK)
-│   ├── yoloe2o365.py         # CoreML export utility
+│   ├── image_utils.py        # save_crop, process_detection_crops, draw_annotations, CJK font rendering via PIL
 │   └── classes/
-│       ├── beverage_cls.py       # BEVERAGE_CONTAINER_CLASSES (7 items)
-│       └── objects365_classes.py  # 365-class list (legacy, used for name lookups)
+│       └── beverage_cls.py       # BEVERAGE_CONTAINER_CLASSES (7 items)
 ├── api/
 │   ├── __init__.py
 │   ├── app.py                # FastAPI + lifespan: loads detector, embedder, Chroma, services
@@ -39,6 +38,7 @@ sku-match/
 │   ├── models.py             # ORM: SKU, SKUMedia, RecognitionLog, TrainJob
 │   ├── schemas.py            # Pydantic request/response models
 │   ├── tasks.py              # asyncio task runner for embedding jobs
+│   ├── dependencies.py       # FastAPI DI providers replacing app.state access
 │   ├── routes/
 │   │   ├── __init__.py
 │   │   ├── goods.py          # SKU CRUD (new/update/delete/enable/list/media)
@@ -53,15 +53,15 @@ sku-match/
 │   ├── build_index.py        # Build Chroma index from reference images
 │   ├── crop_reference.py     # Crop raw refs with YOLOE
 │   ├── export_onnx.py        # Export DINOv2 to ONNX format
-│   ├── init_and_download.sh  # First-time setup: install deps, download weights
+│   ├── init_and_download.sh  # Reinit DB + Chroma, add SKUs from reference/, download crops
 │   ├── sync_local.sh         # Sync from remote to local
 │   ├── sync_remote.sh        # Sync to remote server
 │   └── test_detection.py     # Detection test script
 ├── docs/
-│   ├── API.md.bak            # Chinese API requirements spec (archived)
 │   ├── API_GUIDE.md          # API usage guide
 │   ├── AUDIT.md              # Codebase audit findings
 │   ├── CLEANUP_PLAN.md       # Cleanup progress tracker
+│   ├── CODE_QUALITY.md       # Code quality review + fix tracking
 │   ├── CONSIDERATIONS.md     # Evaluated improvements (SAHI, FAISS, Qdrant, etc.)
 │   ├── IMAGE_SIMILARITY_SEARCH_REPORT.md
 │   ├── PERF_PLAN.md          # Performance improvement plan
@@ -92,15 +92,17 @@ sku-match/
 | API entry | api/app.py | FastAPI + lifespan, uvicorn server |
 | API config | api/config.py | pydantic-settings, .env file |
 | API auth | api/auth.py | API key verification + per-IP rate limiting (disabled by default) |
-| Detection logic | src/core.py | detect() function (CLI) |
+| API DI | api/dependencies.py | Typed FastAPI dependency providers |
+| Detection logic | src/core.py | detect() function (CLI), parse_detections() shared |
 | DINOv2 embedder | src/embedder.py | 3 variants: vits14(384-dim), vitb14(768-dim), vitl14(1024-dim). Optional ONNX backend |
-| SKU indexer | src/indexer.py | Chroma-backed: search_batch with top-2-per-SKU scoring |
+| SKU indexer | src/indexer.py | Chroma-backed: search_batch, score_matches with top-2-per-SKU scoring |
 | Detection + matching | src/matcher.py | SKUMatcher class with crop saving |
+| Masking | src/masking.py | extract_binary_masks, mask_background with configurable background color |
 | Reference processing | src/reference_processor.py | crop→embed→index pipeline, build_from_directory() |
 | Recognition service | api/services/recognition.py | Full pipeline: detect → embed → match → annotate |
 | Image storage | api/services/image_storage.py | Download, upload to Qiniu, cleanup, old file deletion |
-| Shared utilities | src/utils.py | detect_device(), free_gpu_memory(), disable_ssl_verification(), embedding_to_list(), configure_ultralytics_weights() |
-| Image utilities | src/image_utils.py | isolate_object, save_crop, draw_annotations, CJK font rendering via PIL (Noto Sans CJK) |
+| Shared utilities | src/utils.py | detect_device(), free_gpu_memory(), embedding_to_list(), configure_ultralytics_weights() |
+| Image utilities | src/image_utils.py | save_crop, process_detection_crops, draw_annotations, CJK font rendering via PIL |
 | Build ref index | scripts/build_index.py | --model arg for embedding variant selection |
 | Crop raw refs | scripts/crop_reference.py | Pre-process raw photos with YOLOE detection |
 | API routes | api/routes/ | goods.py (SKU CRUD), recognition.py (detect/fix), logs.py, system.py |
@@ -114,62 +116,60 @@ sku-match/
 
 | Symbol | Type | Location | Role |
 |--------|------|----------|------|
-| main() | function | main.py:163 | CLI entry (argparse) — delegates to run_matching() or run_detection() |
-| run_detection() | function | main.py:30 | Detection-only mode (--detection-only) |
-| run_matching() | function | main.py:44 | SKU matching mode (default) |
-| get_next_match_dir() | function | main.py:20 | Auto-increment match output directory |
-| _save_image_results() | function | main.py:124 | Save match results to JSON + copy original |
-| detect() | function | src/core.py:11 | Core YOLOE inference (CLI) — batch prediction with crop saving |
-| _save_result() | function | src/core.py:65 | Save detection JSON + masked crops |
-| DINOv2Embedder | class | src/embedder.py:28 | DINOv2 embedding wrapper (FP16 on CUDA, optional ONNX backend) |
-| DINOv2Variant | type | src/embedder.py:16 | Literal type: "dinov2_vits14"/"dinov2_vitb14"/"dinov2_vitl14" |
-| DIMENSIONS | dict | src/embedder.py:17 | Model name → embedding dimension mapping |
-| embed() | method | src/embedder.py:110 | Embed single PIL Image → np.ndarray |
-| embed_batch() | method | src/embedder.py:113 | Embed batch of PIL Images → np.ndarray |
-| embed_path() | method | src/embedder.py:137 | Embed image from file path |
-| VectorMatch | class | src/indexer.py:23 | Single vector-level match result (sku_id, similarity, rank, media_url) |
-| SKUIndexer | class | src/indexer.py:64 | Chroma-backed SKU index with top-2 scoring |
-| _softmax() | function | src/indexer.py:43 | Softmax probability distribution over SKU scores |
-| concentration_score() | function | src/indexer.py:53 | Top-1 share of top-K probability mass |
-| init_collection() | method | src/indexer.py:94 | Initialize Chroma collection from persist dir |
-| build() | method | src/indexer.py:116 | Populate collection from SKUReference list |
-| add_reference() | method | src/indexer.py:144 | Upsert single reference embedding |
-| delete_sku() | method | src/indexer.py:169 | Delete all vectors for a SKU |
-| delete_media() | method | src/indexer.py:174 | Delete single media vector |
-| set_enabled() | method | src/indexer.py:180 | Toggle SKU enabled flag in Chroma metadata |
-| search() | method | src/indexer.py:191 | Single-query similarity search |
-| search_batch() | method | src/indexer.py:195 | Batch similarity search with top-2-per-SKU scoring |
-| get_sku_name() | method | src/indexer.py:278 | Get SKU name from cache |
-| load() | method | src/indexer.py:283 | Load collection from directory |
-| SKUMatcher | class | src/matcher.py:20 | Detection + SKU matching with crop saving |
-| match_images() | method | src/matcher.py:42 | Match SKUs across images (detect → embed → search) |
-| _detect_all() | method | src/matcher.py:133 | Run YOLOE detection on all images in batches |
-| from_index_dir() | classmethod | src/matcher.py:186 | Factory: load models + index from directory |
-| Detection | dataclass | src/types.py:8 | Detection result: bbox, confidence, class_name, class_id, mask |
+| main() | function | main.py:160 | CLI entry (argparse) — delegates to run_matching() or run_detection() |
+| run_detection() | function | main.py:27 | Detection-only mode (--detection-only) |
+| run_matching() | function | main.py:41 | SKU matching mode (default) |
+| get_next_match_dir() | function | main.py:17 | Auto-increment match output directory |
+| parse_detections() | function | src/core.py:13 | Shared YOLOE box→Detection parsing |
+| detect() | function | src/core.py:45 | Core YOLOE inference (CLI) — batch prediction with crop saving |
+| _save_result() | function | src/core.py:99 | Save detection JSON + masked crops |
+| DINOv2Embedder | class | src/embedder.py:27 | DINOv2 embedding wrapper (FP16 on CUDA, optional ONNX backend) |
+| DINOv2Variant | type | src/embedder.py:15 | Literal type: "dinov2_vits14"/"dinov2_vitb14"/"dinov2_vitl14" |
+| DIMENSIONS | dict | src/embedder.py:16 | Model name → embedding dimension mapping |
+| DINOv2Embedder.embed() | method | src/embedder.py:104 | Embed single PIL Image → np.ndarray |
+| DINOv2Embedder.embed_batch() | method | src/embedder.py:107 | Embed batch of PIL Images → np.ndarray |
+| DINOv2Embedder.embed_path() | method | src/embedder.py:131 | Embed image from file path |
+| VectorMatch | class | src/indexer.py:22 | Single vector-level match result (sku_id, similarity, rank, media_url) |
+| SKUIndexer | class | src/indexer.py:112 | Chroma-backed SKU index with top-2 scoring |
+| EPSILON | constant | src/indexer.py:17 | Small score for unranked SKUs in softmax (1e-8) |
+| COLLECTION_NAME | constant | src/indexer.py:36 | Chroma collection name ("sku_embeddings") |
+| COSINE_DISTANCE_TO_SIMILARITY | constant | src/indexer.py:39 | Conversion factor (2.0) |
+| _softmax() | function | src/indexer.py:42 | Softmax probability distribution over SKU scores |
+| concentration_score() | function | src/indexer.py:52 | Top-1 share of top-K probability mass |
+| score_matches() | function | src/indexer.py:63 | Shared scoring: detections + search_results → list[SKUMatch] |
+| SKUIndexer.init_collection() | method | src/indexer.py:142 | Initialize Chroma collection from persist dir |
+| SKUIndexer.build() | method | src/indexer.py:161 | Populate collection from SKUReference list |
+| SKUIndexer.add_reference() | method | src/indexer.py:189 | Upsert single reference embedding |
+| SKUIndexer.delete_sku() | method | src/indexer.py:214 | Delete all vectors for a SKU |
+| SKUIndexer.delete_media() | method | src/indexer.py:219 | Delete single media vector |
+| SKUIndexer.set_enabled() | method | src/indexer.py:225 | Toggle SKU enabled flag in Chroma metadata |
+| SKUIndexer.update_sku_name() | method | src/indexer.py:236 | Update SKU name in Chroma metadata |
+| SKUIndexer.search() | method | src/indexer.py:248 | Single-query similarity search |
+| SKUIndexer.search_batch() | method | src/indexer.py:252 | Batch similarity search with top-2-per-SKU scoring |
+| SKUIndexer.get_sku_name() | method | src/indexer.py:335 | Get SKU name from cache |
+| SKUMatcher | class | src/matcher.py:21 | Detection + SKU matching with crop saving |
+| SKUMatcher.match_images() | method | src/matcher.py:43 | Match SKUs across images (detect → embed → search) |
+| SKUMatcher.from_index_dir() | classmethod | src/matcher.py:154 | Factory: load models + index from directory |
+| Detection | dataclass | src/types.py:8 | Detection result: bbox, confidence, class_name, class_id |
 | SKUReference | dataclass | src/types.py:17 | Reference entry: sku_id, sku_name, image_path, embedding |
-| SKUMatch | dataclass | src/types.py:25 | Match result: detection, sku_id, match_score, concentration, distribution |
-| detect_device() | function | src/utils.py:20 | Auto-detect: cuda → mps → cpu |
-| free_gpu_memory() | function | src/utils.py:29 | Release cached GPU memory (gc + cuda.empty_cache) |
-| disable_ssl_verification() | function | src/utils.py:36 | Disable SSL cert verification (macOS compat) |
-| embedding_to_list() | function | src/utils.py:42 | Convert numpy/torch embedding to plain list for Chroma |
-| configure_ultralytics_weights() | function | src/utils.py:13 | Sets ultralytics weights_dir to local models/ |
+| SKUMatch | dataclass | src/types.py:25 | Match result: detection, sku_id, match_score, concentration, distribution, top_vectors |
+| detect_device() | function | src/utils.py:21 | Auto-detect: cuda → mps → cpu |
+| free_gpu_memory() | function | src/utils.py:30 | Release cached GPU memory (gc + cuda.empty_cache) |
+| embedding_to_list() | function | src/utils.py:37 | Convert numpy/torch embedding to plain list for Chroma |
+| configure_ultralytics_weights() | function | src/utils.py:14 | Sets ultralytics weights_dir to local models/ |
+| IMAGENET_MEAN_RGB | constant | src/masking.py:15 | Default background color for masking (123.5, 116.5, 103.5) |
+| normalize_mask() | function | src/masking.py:18 | Normalize mask to uint8 (0 or 255) |
+| extract_binary_masks() | function | src/masking.py:32 | Extract binary masks from YOLOE result |
+| mask_background() | function | src/masking.py:62 | Apply configurable background color behind mask |
 | ProcessResult | dataclass | src/reference_processor.py:21 | Result from process_and_add: success + crop_path |
 | select_best_detection() | function | src/reference_processor.py:27 | Select smallest center-covering detection box |
 | ReferenceProcessor | class | src/reference_processor.py:50 | Processes raw reference images: detect → crop → embed → index |
-| crop_reference() | method | src/reference_processor.py:69 | Detect primary object and return cropped PIL Image |
-| process_and_add() | method | src/reference_processor.py:115 | Full pipeline: crop → embed → index → save crop to temp |
-| build_from_directory() | method | src/reference_processor.py:146 | Build index from directory of reference images |
-| delete_sku_references() | method | src/reference_processor.py:220 | Delete all vectors for a SKU |
-| delete_media_reference() | method | src/reference_processor.py:224 | Delete single media vector |
-| set_sku_enabled() | method | src/reference_processor.py:228 | Toggle SKU enabled flag |
-| update_sku_name() | method | src/reference_processor.py:232 | Update SKU name in Chroma metadata |
-| normalize_mask() | function | src/image_utils.py:11 | Normalize mask to uint8 (0 or 255) |
-| isolate_object() | function | src/image_utils.py:25 | Isolate object using binary mask with optional exclusion |
-| save_crop() | function | src/image_utils.py:59 | Save a cropped PIL Image |
-| process_detection_crops() | function | src/image_utils.py:74 | Process all detections and save masked crops |
-| extract_binary_masks() | function | src/image_utils.py:122 | Extract binary masks from YOLOE result |
-| _load_cjk_font() | function | src/image_utils.py:155 | Load Noto Sans CJK font for Chinese text rendering |
-| draw_annotations() | function | src/image_utils.py:173 | Draw bounding boxes and SKU labels on image |
+| ReferenceProcessor.crop_reference() | method | src/reference_processor.py:69 | Detect primary object and return cropped PIL Image |
+| ReferenceProcessor.process_and_add() | method | src/reference_processor.py:115 | Full pipeline: crop → embed → index → save crop to temp |
+| ReferenceProcessor.build_from_directory() | method | src/reference_processor.py:147 | Build index from directory of reference images |
+| save_crop() | function | src/image_utils.py:12 | Save a cropped PIL Image |
+| process_detection_crops() | function | src/image_utils.py:27 | Process all detections and save masked crops |
+| draw_annotations() | function | src/image_utils.py:93 | Draw bounding boxes and SKU labels on image |
 | BEVERAGE_CONTAINER_CLASSES | list | src/classes/beverage_cls.py:10 | 7 beverage container class names for YOLOE |
 | Settings | class | api/config.py:6 | pydantic-settings configuration |
 | settings | instance | api/config.py:42 | Global settings singleton |
@@ -193,22 +193,28 @@ sku-match/
 | SKUEnableRequest | class | api/schemas.py:98 | Pydantic: skuId, enabled |
 | SKUMediaRequest | class | api/schemas.py:108 | Pydantic: skuId, action (add/delete), media list |
 | ApiResponse | class | api/schemas.py:135 | Pydantic: code (1=ok, 0=error), data, msg |
-| start_embed_task() | function | api/tasks.py:15 | Start async embedding task for new SKU |
-| get_task_status() | function | api/tasks.py:122 | Check running task status |
+| process_single_media() | function | api/tasks.py:15 | Shared download→embed→upload→cleanup for single media item |
+| start_embed_task() | function | api/tasks.py:55 | Start async embedding task for new SKU |
+| get_task_status() | function | api/tasks.py:136 | Check running task status |
 | RecognitionService | class | api/services/recognition.py:22 | Full recognition pipeline (sync) |
-| recognize() | method | api/services/recognition.py:44 | Single-image recognition: detect → embed → match → annotate |
+| RecognitionService.recognize() | method | api/services/recognition.py:44 | Single-image recognition: detect → embed → match → annotate |
 | ImageStorage | class | api/services/image_storage.py:13 | Download images, manage result paths, Qiniu upload |
-| download_image() | method | api/services/image_storage.py:54 | Download image (local path or URL) |
-| cleanup_download() | method | api/services/image_storage.py:89 | Remove downloaded temp file |
-| cleanup_old_results() | method | api/services/image_storage.py:36 | Delete annotated images older than max_age_hours |
-| get_result_path() | method | api/services/image_storage.py:98 | Get annotated image path for task_id |
-| get_result_url() | method | api/services/image_storage.py:103 | Get annotated image relative URL |
-| upload_to_qiniu() | method | api/services/image_storage.py:130 | Upload file to Qiniu and return CDN URL |
-| _fetch_qiniu_token() | method | api/services/image_storage.py:108 | Fetch fresh upload token from internal service |
+| ImageStorage.download_image() | method | api/services/image_storage.py:54 | Download image (local path or URL) |
+| ImageStorage.cleanup_download() | method | api/services/image_storage.py:89 | Remove downloaded temp file |
+| ImageStorage.cleanup_old_results() | method | api/services/image_storage.py:36 | Delete annotated images older than max_age_hours |
+| ImageStorage.get_result_path() | method | api/services/image_storage.py:98 | Get annotated image path for task_id |
+| ImageStorage.get_result_url() | method | api/services/image_storage.py:103 | Get annotated image relative URL |
+| ImageStorage.upload_to_qiniu() | method | api/services/image_storage.py:130 | Upload file to Qiniu and return CDN URL |
 | UnicodeJSONResponse | class | api/app.py:170 | JSONResponse with ensure_ascii=False |
 | main() | function | api/app.py:203 | Entry point for sku-match-api console script |
-| _get_sku_or_error() | function | api/routes/goods.py:31 | Helper: fetch SKU or return ApiResponse error |
-| _to_full_url() | function | api/routes/goods.py:143 | Convert relative path to full URL |
+| get_indexer() | function | api/dependencies.py:16 | DI provider → SKUIndexer |
+| get_processor() | function | api/dependencies.py:20 | DI provider → ReferenceProcessor |
+| get_recognition_service() | function | api/dependencies.py:24 | DI provider → RecognitionService |
+| get_image_storage() | function | api/dependencies.py:28 | DI provider → ImageStorage |
+| get_inference_executor() | function | api/dependencies.py:32 | DI provider → ThreadPoolExecutor |
+| get_device() | function | api/dependencies.py:36 | DI provider → device string |
+| _get_sku_or_error() | function | api/routes/goods.py:35 | Helper: fetch SKU or return ApiResponse error |
+| _to_full_url() | function | api/routes/goods.py:161 | Convert relative path to full URL |
 
 ## API ENDPOINTS
 
@@ -227,7 +233,7 @@ sku-match/
 | GET  | /results/{path} | app.static | Static file serving for result images |
 | GET  | /health | app.health | Health check |
 
-> **Note:** All `/api/v1/*` endpoints have `Depends(verify_api_key)` and `Depends(check_rate_limit)` (disabled by default via config — empty `API_KEY` and `RATE_LIMIT=0`).
+> **Note:** All `/api/v1/*` endpoints have `Depends(verify_api_key)` and `Depends(check_rate_limit)` (disabled by default via config — empty `API_KEY` and `RATE_LIMIT=0`). All routes use `response_model=ApiResponse`.
 
 ## ENTRY POINTS
 
@@ -250,7 +256,8 @@ sku-match/
 - **Detection classes**: `BEVERAGE_CONTAINER_CLASSES` (7 items: bottle, canned, carton, empty paper box, full paper box, strawed drink, keg)
 - **Index**: Chroma vector store with cosine similarity, top-2-per-SKU scoring. Unified path: `chroma_data/`
 - **API prefix**: `/api/v1/`
-- **API response**: All endpoints return `ApiResponse(code=1/0, data=..., msg="success")`
+- **API response**: All endpoints return `ApiResponse(code=1/0, data=..., msg="success")` with `response_model=ApiResponse`
+- **DI pattern**: Routes use `Depends()` from `api/dependencies.py` — no direct `app.state` access in routes
 - **Async pattern**: CPU/GPU-bound work runs via `asyncio.to_thread()` or `loop.run_in_executor()` to avoid blocking event loop
 - **GPU concurrency**: API uses dedicated `ThreadPoolExecutor(max_workers=1)` for GPU inference
 - **Warm-up**: YOLOE warm-up prediction runs at API startup (dummy 640x640 image)
@@ -259,7 +266,8 @@ sku-match/
 - **Qiniu CDN**: Annotated images uploaded to Qiniu, `matched_image` returns full CDN URL. Falls back to local path with `qiniu_upload_failed=True` flag on failure.
 - **DB pool**: SQLAlchemy pool_size=5, max_overflow=10, pool_recycle=3600, pool_pre_ping=True
 - **Temp cleanup**: Downloaded images cleaned up after processing in both recognition routes and embedding tasks
-- **match_conf threshold**: Filters low-confidence matches — below threshold sets sku_id="", sku_name="", match_score=0.0 (marks as unmatched)
+- **match_conf threshold**: Configurable via `MATCH_CONF` env var (default 0 = disabled). Filters low-confidence matches — below threshold sets sku_id="", sku_name="", match_score=0.0
+- **train_status**: `SUCCESS` if all images embed OK. `FAILED: a/b` if a out of b images failed. `FAILED` on task-level exception.
 - **sku_distribution**: Returns only top 5 entries by probability (sorted descending)
 - **Annotated image cleanup**: Background task runs hourly, deletes files older than `RESULTS_MAX_AGE_HOURS` (default 24)
 - **Rate limiter**: Uses `asyncio.Lock` for atomicity, prunes empty IP entries when >1000 IPs tracked
@@ -267,7 +275,7 @@ sku-match/
 - **Fix endpoint**: Rejects unknown taskIds with `ApiResponse(code=0, msg="taskId '...' not found")`
 - **Duplicate detection**: Detect endpoint rejects duplicate taskIds; new_sku rejects duplicate skuIds and trainJobIds
 - **Crop naming**: `{image_name}_{index}_{sku_id}.jpg`
-- **Index operations**: All Chroma writes go through `ReferenceProcessor` (sync), called via `asyncio.to_thread()` in routes
+- **Index operations**: Chroma writes go through `ReferenceProcessor` (sync) for crop+embed pipeline; direct metadata CRUD on `SKUIndexer` (enable, delete, rename). Called via `asyncio.to_thread()` in routes.
 - **Unicode JSON**: API uses `UnicodeJSONResponse` (ensure_ascii=False) as default response class
 - **uv required**: All commands use `uv run` — never `python` or `pip` directly. No manual venv activation. `uv sync` for install, `uv run` for execution.
 
@@ -275,7 +283,6 @@ sku-match/
 
 - **sys.path hack**: tests/test_detection.py, scripts/, and scripts/export_onnx.py manipulate sys.path
 - **No docstrings**: Minimal documentation on most functions
-- **SSL override**: `ssl._create_default_https_context` disabled in utils.py (macOS compat, fallback path only)
 - **GFW vendor hacks**: clip vendored locally, mobileclip2_b.ts tracked in models/, aliyun PyPI mirror configured
 
 ## COMMANDS
@@ -307,6 +314,9 @@ uv run sku-match-api
 
 # API: With debug/reload
 DEBUG=true uv run sku-match-api
+
+# API: With custom match confidence
+MATCH_CONF=0.5 uv run sku-match-api
 
 # API: With Qiniu config
 QINIU_ACCESS_KEY=xxx QINIU_SECRET_KEY=xxx QINIU_BUCKET=xxx uv run sku-match-api
@@ -341,15 +351,14 @@ apt-get install fonts-noto-cjk
 - **Default mode**: SKU matching (not detection-only)
 - **Embedding models**: dinov2_vits14 (384-dim, default), dinov2_vitb14 (768-dim), dinov2_vitl14 (1024-dim)
 - **Chroma index**: PersistentClient with HNSW cosine similarity. Incremental add/delete — no full rebuild needed. Unified path: `chroma_data/` across CLI, API, and build scripts.
-- **Match scoring**: Top-2-per-SKU cosine similarity sum → softmax probability distribution (0–1 range). Threshold default 0.5. Concentration score (top-1 share of top-K probability mass) replaces match_ratio. Detection rank positions (top2_ranks) tracked per match.
+- **Match scoring**: Top-2-per-SKU cosine similarity sum → softmax probability distribution (0–1 range). `MATCH_CONF` default 0 (disabled). Concentration score (top-1 share of top-K probability mass). Detection rank positions (top2_ranks) tracked per match.
 - **Device auto-detect**: `detect_device()` returns cuda → mps → cpu
-- **SSL fix**: Disabled certificate verification for macOS compatibility (fallback path only when local weights unavailable)
 - **First run**: Downloads YOLOE model (~400MB). DINOv2 weights vendored locally at models/*.pth (no download needed).
-- **API state**: Models loaded once at FastAPI lifespan startup, reused across requests
-- **ReferenceProcessor**: Unified crop→embed→index pipeline. Crops via YOLOE detection + mask isolation, falls back to full-image embedding. Used directly by API routes.
+- **API state**: Models loaded once at FastAPI lifespan startup, reused across requests. Services accessed via typed DI providers in `api/dependencies.py`.
+- **ReferenceProcessor**: Unified crop→embed→index pipeline. Crops via YOLOE detection + mask isolation, falls back to skipping if no detection. Used by API routes for new SKU and media add.
+- **Masking module**: `src/masking.py` — configurable background color (default ImageNet mean RGB). Used by CLI detection and reference processor.
 - **Detection confidence**: `--conf` flag (CLI) and `DET_CONF` setting (API) control YOLOE detection threshold. Passed to `predict(conf=)`. retina_masks=False to prevent OOM on high-res images.
 - **GFW compatibility**: `clip` vendored locally at `vendor/clip_package/`. `mobileclip2_b.ts` in `models/` avoids GitHub download. PyPI via aliyun mirror.
-- **Index operations**: All Chroma writes go through `ReferenceProcessor` (sync), called via `asyncio.to_thread()` in routes.
 - **FP16 inference**: Both YOLOE and DINOv2 use model.half() at load time when device=cuda. ~1.8x speedup over FP32 on L20 GPU.
 - **ONNX backend**: Optional via --onnx flag / USE_ONNX setting. Export with scripts/export_onnx.py. Currently not viable on 2GB GPU (ONNX Runtime lacks flash attention).
 - **DINOv2 vendoring**: Full dinov2 source at vendor/dinov2/ + weights at models/dinov2_*_pretrain.pth. No internet needed at runtime.
@@ -358,3 +367,5 @@ apt-get install fonts-noto-cjk
 - **API auth**: Optional API key authentication via `X-API-Key` header. Rate limiting per-IP (requests/minute). Both disabled by default (empty API_KEY, RATE_LIMIT=0).
 - **Input validation**: Pydantic Field constraints (max_length, min_length), Literal types for mode/action, non-empty string validators on all request models.
 - **Console scripts**: `sku-match` (CLI) and `sku-match-api` (API server) defined in pyproject.toml [project.scripts].
+- **Shared pipeline**: `parse_detections()` (src/core.py) and `score_matches()` (src/indexer.py) used by both CLI matcher and API recognition service.
+- **process_single_media()**: Shared download→embed→upload→cleanup helper in api/tasks.py, used by both start_embed_task and manage_media route.

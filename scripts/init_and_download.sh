@@ -14,7 +14,7 @@ CDN_DOMAIN="https://vr.jihaihotpot.com/"
 ORIGIN_DOMAIN="http://iovip-z2.qiniuio.com"
 
 echo "=== Step 1: Stop API ==="
-ssh sku-match-jihai-gpu "systemctl stop sku-match || true"
+systemctl stop sku-match || true
 sleep 2
 
 echo "=== Step 2: Wipe DB + Chroma ==="
@@ -22,7 +22,7 @@ rm -f "$DB_PATH"
 rm -rf "$CHROMA_PATH"
 
 echo "=== Step 3: Start API ==="
-ssh sku-match-jihai-gpu "systemctl start sku-match"
+systemctl start sku-match
 sleep 5
 
 for i in $(seq 1 20); do
@@ -34,7 +34,7 @@ for i in $(seq 1 20); do
     sleep 2
 done
 if ! curl -sf "$API_URL/health" > /dev/null; then
-    echo "ERROR: API did not start. Check: ssh sku-match-jihai-gpu 'systemctl status sku-match'"
+    echo "ERROR: API did not start. Check: systemctl status sku-match"
     exit 1
 fi
 

@@ -95,33 +95,25 @@ async def start_embed_task(
             failed_json = json.dumps(embedding_failed) if embedding_failed else None
 
             if embedding_failed:
+                train_status = f"FAILED: {len(embedding_failed)}/{len(media_urls)}"
                 logger.warning(
                     "Indexing task completed with %d/%d failed images: train_job_id=%s",
                     len(embedding_failed), len(media_urls), train_job_id,
                 )
-                async with async_session() as session:
-                    await session.execute(
-                        update(TrainJob)
-                        .where(TrainJob.train_job_id == train_job_id)
-                        .values(status="completed", progress=100, embedding_failed=failed_json)
-                    )
-                    await session.execute(
-                        update(SKU).where(SKU.sku_id == sku_id).values(train_status="SUCCESS")
-                    )
-                    await session.commit()
             else:
-                async with async_session() as session:
-                    await session.execute(
-                        update(TrainJob)
-                        .where(TrainJob.train_job_id == train_job_id)
-                        .values(status="completed", progress=100)
-                    )
-                    await session.execute(
-                        update(SKU).where(SKU.sku_id == sku_id).values(train_status="SUCCESS")
-                    )
-                    await session.commit()
-
+                train_status = "SUCCESS"
                 logger.info("Indexing task completed: train_job_id=%s", train_job_id)
+
+            async with async_session() as session:
+                await session.execute(
+                    update(TrainJob)
+                    .where(TrainJob.train_job_id == train_job_id)
+                    .values(status="completed", progress=100, embedding_failed=failed_json)
+                )
+                await session.execute(
+                    update(SKU).where(SKU.sku_id == sku_id).values(train_status=train_status)
+                )
+                await session.commit()
 
         except Exception:
             logger.exception("Indexing task failed: train_job_id=%s", train_job_id)
