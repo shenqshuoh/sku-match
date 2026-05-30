@@ -37,7 +37,7 @@ class SKURerankResult:
 
     sku_id: str
     sku_name: str
-    blended_score: float  # β × norm_coarse + (1−β) × patch_score
+    blended_score: float  # β × patch_score + (1−β) × norm_coarse
     coarse_score: float   # Max coarse score across candidates
     patch_score: float    # Max patch score across candidates
     num_candidates: int
@@ -82,14 +82,14 @@ def rerank(
       2. Compute max-of-mean similarity for each candidate vs query.
       3. Group by SKU, take max patch_score per SKU.
       4. Normalize coarse scores to [0, 1].
-      5. Blend: ``blended[sku] = β × norm_coarse + (1−β) × patch_score``.
+      5. Blend: ``blended[sku] = β × patch_score + (1−β) × norm_coarse``.
       6. Sort by blended_score descending, return top-N.
 
     Args:
         query_patches: (N, D) patch tokens from the query detection crop.
         patch_store: Patch file store for loading candidate patches.
         top_vectors: Stage-1 ChromaDB results (must have doc_id populated).
-        blend_beta: Weight for coarse score. 0.3 = 30% coarse, 70% patches.
+        blend_beta: Weight for patch score. 0.3 = 30% patch, 70% coarse.
         top_n: Number of SKU-level results to return.
 
     Returns:
@@ -151,7 +151,7 @@ def rerank(
 
     # 5. Blend scores
     for r in sku_results:
-        r.blended_score = blend_beta * r.coarse_score + (1.0 - blend_beta) * r.patch_score
+        r.blended_score = blend_beta * r.patch_score + (1.0 - blend_beta) * r.coarse_score
 
     # 6. Sort by blended_score descending
     sku_results.sort(key=lambda r: r.blended_score, reverse=True)

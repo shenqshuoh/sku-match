@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # Patch re-ranking
     USE_RERANKING: bool = True
     RERANK_TOP_K: int = 50
-    RERANK_BLEND_BETA: float = 0.5
+    RERANK_BLEND_BETA: float = 0.7
 
     # Patch storage
     PATCH_DIR: str = "data/patches"
