@@ -18,8 +18,9 @@ from api.routes import goods, logs, recognition, system
 from api.services.image_storage import ImageStorage
 from api.services.recognition import RecognitionService
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
-from src.embedder import DINOv2Embedder
+from src.embedder import Embedder
 from src.indexer import SKUIndexer
+from src.patch_store import PatchStore
 from src.reference_processor import ReferenceProcessor
 from src.utils import configure_ultralytics_weights
 from src.utils import detect_device as _detect_device
@@ -61,11 +62,18 @@ async def lifespan(app: FastAPI):
     detector.predict(source=dummy, retina_masks=False, verbose=False)
     logger.info("Detector warm-up complete")
 
-    logger.info("Loading DINOv2 embedder: %s (onnx=%s)", settings.EMB_MODEL, settings.USE_ONNX)
-    embedder = DINOv2Embedder(
+    feature_type = "fused" if settings.USE_FUSED_FEATURES else "cls"
+    logger.info(
+        "Loading embedder: %s (onnx=%s, fused=%s, alpha=%s)",
+        settings.EMB_MODEL, settings.USE_ONNX, settings.USE_FUSED_FEATURES, settings.FUSE_ALPHA,
+    )
+    embedder = Embedder(
         model_name=settings.EMB_MODEL,
         device=device,
         use_onnx=settings.USE_ONNX,
+        use_fused=settings.USE_FUSED_FEATURES,
+        fuse_alpha=settings.FUSE_ALPHA,
+        gem_p=settings.GEM_P,
     )
 
     # Init Chroma
@@ -80,6 +88,19 @@ async def lifespan(app: FastAPI):
     )
 
     indexer = SKUIndexer(collection=collection)
+
+    # Validate feature type compatibility
+    indexer.validate_feature_type(feature_type)
+
+    # Initialize patch store for re-ranking
+    patch_store: PatchStore | None = None
+    if settings.USE_RERANKING:
+        patch_store = PatchStore(patch_dir=settings.PATCH_DIR)
+        logger.info("Patch re-ranking enabled: patch_dir=%s, top_k=%d, blend_beta=%s",
+                     settings.PATCH_DIR, settings.RERANK_TOP_K, settings.RERANK_BLEND_BETA)
+    else:
+        logger.info("Patch re-ranking disabled")
+
     image_storage = ImageStorage(
         results_dir=settings.RESULTS_DIR,
         download_timeout=settings.DOWNLOAD_TIMEOUT,
@@ -94,6 +115,8 @@ async def lifespan(app: FastAPI):
         embedder=embedder,
         indexer=indexer,
         device=device,
+        patch_store=patch_store,
+        feature_type=feature_type,
     )
     recognition_service = RecognitionService(
         detector=detector,
@@ -104,6 +127,10 @@ async def lifespan(app: FastAPI):
         imgsz=settings.IMGSZ,
         match_conf=settings.MATCH_CONF,
         concentration_topk=settings.CONCENTRATION_TOPK,
+        patch_store=patch_store,
+        use_reranking=settings.USE_RERANKING,
+        rerank_top_k=settings.RERANK_TOP_K,
+        rerank_blend_beta=settings.RERANK_BLEND_BETA,
     )
 
     # Dedicated GPU inference executor — prevents concurrent GPU access under load
@@ -120,6 +147,8 @@ async def lifespan(app: FastAPI):
     app.state.image_storage = image_storage
     app.state.processor = processor
     app.state.recognition_service = recognition_service
+    app.state.patch_store = patch_store
+    app.state.feature_type = feature_type
 
     logger.info("Startup complete")
 
@@ -200,8 +229,18 @@ results_path.mkdir(parents=True, exist_ok=True)
 app.mount("/results", StaticFiles(directory=str(results_path)), name="results")
 
 
+def _setup_file_logging() -> None:
+    """Add file handler to root logger. Called once from main() before uvicorn."""
+    _log_file = Path(settings.LOG_FILE)
+    _log_file.parent.mkdir(parents=True, exist_ok=True)
+    _fh = logging.FileHandler(_log_file, mode="a", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(_fh)
+
+
 def main():
     """Entry point for `sku-match-api` console script."""
+    _setup_file_logging()
     import uvicorn
     uvicorn.run(
         "api.app:app",

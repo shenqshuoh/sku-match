@@ -22,11 +22,18 @@ logger = logging.getLogger(__name__)
 class VectorMatch:
     """A single vector-level match result from similarity search."""
 
-    __slots__ = ("sku_id", "sku_name", "similarity", "rank", "media_url")
+    __slots__ = ("doc_id", "sku_id", "sku_name", "similarity", "rank", "media_url")
 
     def __init__(
-        self, sku_id: str, sku_name: str, similarity: float, rank: int, media_url: str
+        self,
+        doc_id: str,
+        sku_id: str,
+        sku_name: str,
+        similarity: float,
+        rank: int,
+        media_url: str,
     ) -> None:
+        self.doc_id = doc_id
         self.sku_id = sku_id
         self.sku_name = sku_name
         self.similarity = similarity
@@ -158,7 +165,7 @@ class SKUIndexer:
             COLLECTION_NAME, dir_path, self._collection.count(),
         )
 
-    def build(self, references: list[SKUReference]) -> None:
+    def build(self, references: list[SKUReference], feature_type: str | None = None) -> None:
         """Populate the Chroma collection from a list of SKUReference objects. Clears existing data first."""
         if not references:
             return
@@ -175,12 +182,15 @@ class SKUIndexer:
             doc_id = f"{ref.sku_id}__{i:04d}"
             ids.append(doc_id)
             embeddings.append(embedding_to_list(ref.embedding))
-            metadatas.append({
+            meta = {
                 "sku_id": ref.sku_id,
                 "sku_name": ref.sku_name,
                 "enabled": True,
                 "image_path": str(ref.image_path),
-            })
+            }
+            if feature_type is not None:
+                meta["feature_type"] = feature_type
+            metadatas.append(meta)
 
         self.collection.add(ids=ids, embeddings=embeddings, metadatas=metadatas)
         self._refresh_cache()
@@ -193,11 +203,14 @@ class SKUIndexer:
         media_id: str,
         embedding: np.ndarray,
         metadata: dict | None = None,
+        feature_type: str | None = None,
     ) -> None:
         doc_id = f"{sku_id}__{media_id}"
-        meta = {"sku_id": sku_id, "sku_name": sku_name, "enabled": True}
+        meta: dict = {"sku_id": sku_id, "sku_name": sku_name, "enabled": True}
         if metadata:
             meta.update(metadata)
+        if feature_type is not None:
+            meta["feature_type"] = feature_type
 
         emb_list = embedding.tolist() if isinstance(embedding, np.ndarray) else list(embedding)
         if isinstance(emb_list[0], list):
@@ -245,12 +258,33 @@ class SKUIndexer:
         self._cache_valid = False
         logger.info("Updated sku_name to '%s' for SKU %s (%d vectors)", new_name, sku_id, len(results["ids"]))
 
+    def validate_feature_type(self, expected: str) -> None:
+        """Validate that all existing vectors match the expected feature type.
+
+        Checks the ``feature_type`` metadata field of existing vectors against
+        the expected value.  Raises RuntimeError on mismatch.  Empty collections
+        pass validation.
+
+        Args:
+            expected: ``"fused"`` or ``"cls"``.
+        """
+        sample = self.collection.get(limit=1, include=["metadatas"])
+        if not sample["ids"]:
+            return  # Empty collection — OK
+
+        actual = sample["metadatas"][0].get("feature_type")
+        if actual and actual != expected:
+            raise RuntimeError(
+                f"ChromaDB contains '{actual}' embeddings but config expects '{expected}'. "
+                f"Rebuild the index or change the feature mode setting."
+            )
+
     def search(self, query_embedding: np.ndarray) -> tuple[dict[str, float], dict[str, list[int]]]:
         results = self.search_batch(query_embedding.reshape(1, -1))
         return results[0]
 
     def search_batch(
-        self, query_embeddings: np.ndarray
+        self, query_embeddings: np.ndarray, n_results_override: int | None = None,
     ) -> list[tuple[dict[str, float], dict[str, list[int]], list[VectorMatch]]]:
         """Match detection crops using top-2-per-SKU scoring with softmax normalization.
 
@@ -258,6 +292,12 @@ class SKUIndexer:
         convert to similarity (2.0 - distance), group by sku_id, sum the top-2
         similarities per SKU, then apply softmax to produce a probability distribution
         over all enabled SKUs. Unranked SKUs receive a small epsilon score.
+
+        Args:
+            query_embeddings: Array of query embeddings (one per detection crop).
+            n_results_override: If provided, use this value instead of the
+                auto-computed ``search_multiplier`` to control how many candidates
+                Chroma returns per query.  Useful for re-ranking with a larger pool.
 
         Returns:
             List of (distribution, rank_positions, top_vectors) tuples where:
@@ -274,7 +314,7 @@ class SKUIndexer:
             self._refresh_cache()
 
         all_enabled_skus = set(self._sku_name_cache.keys())
-        n_results = self._get_n_results_size()
+        n_results = n_results_override if n_results_override is not None else self._get_n_results_size()
 
         query_list = [embedding_to_list(emb) for emb in query_embeddings]
 
@@ -294,13 +334,15 @@ class SKUIndexer:
             dists = results["distances"][crop_idx]
 
             # Build raw vector-level match list
+            ids_for_crop = results["ids"][crop_idx]
             top_vectors: list[VectorMatch] = []
             for rank, (meta, distance) in enumerate(zip(metas, dists)):
                 similarity = COSINE_DISTANCE_TO_SIMILARITY - distance
                 sku_id = meta["sku_id"]
                 sku_name = meta.get("sku_name", sku_id)
                 media_url = meta.get("media_url", "")
-                top_vectors.append(VectorMatch(sku_id, sku_name, similarity, rank + 1, media_url))
+                doc_id = ids_for_crop[rank]
+                top_vectors.append(VectorMatch(doc_id, sku_id, sku_name, similarity, rank + 1, media_url))
                 sku_scores.setdefault(sku_id, []).append(similarity)
                 sku_positions.setdefault(sku_id, []).append(rank + 1)  # 1-indexed
 

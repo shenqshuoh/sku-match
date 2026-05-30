@@ -33,7 +33,7 @@ pip install -e .
 
 # 2. Place model weights in models/
 #    - YOLOE: models/yoloe-26l-seg.pt
-#    - DINOv2: models/dinov2_vits14_pretrain.pth (vendored)
+#    - DINOv2: downloaded from HuggingFace Hub on first use
 
 # 3. Start API server
 python -m api.app
@@ -52,7 +52,7 @@ See [docs/API_GUIDE.md](docs/API_GUIDE.md) for API usage and endpoint reference.
 # 1. Prepare reference images in data/references/{sku_id}/*.jpg
 
 # 2. Build the reference index (one-time setup)
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vits14
+python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-small
 
 # 3. Run detection with SKU matching
 python main.py
@@ -61,7 +61,7 @@ python main.py
 python main.py --conf 0.3 --match-conf 0.5 --match-concentration 0.0 --match-verbose
 
 # With custom models
-python main.py --det-model models/yoloe-26l-seg.pt --emb-model dinov2_vitb14
+python main.py --det-model models/yoloe-26l-seg.pt --emb-model facebook/dinov2-base
 ```
 
 ### Detection Only Mode
@@ -87,13 +87,13 @@ python main.py
 
 ```bash
 # Small model (faster): 384-dim embeddings
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vits14
+python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-small
 
 # Base model (balanced): 768-dim embeddings
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitb14
+python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-base
 
 # Large model (higher accuracy): 1024-dim embeddings
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitl14
+python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-large
 ```
 
 ### CLI Options
@@ -105,7 +105,7 @@ python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitl
 | `--detection-only` | - | Run detection without SKU matching |
 | `--index` | chroma_data/ | Chroma index directory |
 | `--det-model` | models/yoloe-26l-seg.pt | YOLOE detection model path |
-| `--emb-model` | dinov2_vits14 | DINOv2 variant: dinov2_vits14/vitb14/vitl14 |
+| `--emb-model` | facebook/dinov2-small | HuggingFace DINOv2 model ID |
 | `--device` | auto | Device: cuda, mps, or cpu |
 | `--conf` | 0.25 | Detection confidence threshold |
 | `--match-conf` | 0.5 | SKU match probability threshold (0–1) |
@@ -122,7 +122,7 @@ python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitl
 |--------|---------|-------------|
 | `-r, --reference-dir` | data/references/ | Reference images directory |
 | `-o, --output-dir` | chroma_data/ | Output directory for Chroma index |
-| `-m, --model` | dinov2_vits14 | Embedding model variant |
+| `-m, --model` | facebook/dinov2-base | Embedding model variant |
 | `--device` | auto | Device for inference |
 
 **crop_reference.py:**
@@ -143,7 +143,7 @@ sku-match/
 ├── pyproject.toml            # v0.2.0
 ├── src/
 │   ├── core.py               # CLI detection
-│   ├── embedder.py           # DINOv2 embedder (PyTorch + optional ONNX)
+│   ├── embedder.py           # DINOv2 embedder (HuggingFace transformers + Optimum ONNX)
 │   ├── indexer.py            # Chroma-backed SKU index
 │   ├── matcher.py            # Detection + matching pipeline
 │   ├── types.py              # Dataclasses
@@ -198,7 +198,7 @@ python tests/test_detection.py
 
 ## Notes
 
-- **First run**: Downloads YOLOE model (~400MB). DINOv2 weights are vendored locally at `models/`.
+- **First run**: Downloads YOLOE model (~400MB). DINOv2 weights downloaded from HuggingFace Hub on first use (~85–330MB).
 - **FP16**: Automatic on CUDA — ~1.8x speedup over FP32.
 - **GPU**: ≥2GB VRAM recommended.
 - **Full config**: See [docs/SETUP.md](docs/SETUP.md) for all configuration options.

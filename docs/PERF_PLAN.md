@@ -52,9 +52,9 @@ FP16 is ~1.8x faster than FP32. Default mode is PyTorch FP16.
 - **Change:** Dummy `predict()` on 640×640 zeros after `set_classes()` — eliminates 1-3s cold start
 
 ### 7. ONNX Runtime for DINOv2 — MEDIUM ⚠️
-- **Status:** DONE (code exists, behind `--onnx` flag / `USE_ONNX` env, NOT viable on 2GB GPU)
-- **Files:** `src/embedder.py`, `pyproject.toml`, `scripts/export_onnx.py` (new)
-- **Change:** Dual-mode embedder. `use_onnx: bool = False` param. ONNX only activated when `use_onnx=True`. ONNX deps moved to optional `[onnx]` group in pyproject.toml.
+- **Status:** UPDATED — now uses Optimum ORTModelForFeatureExtraction with on-the-fly ONNX export. Custom export script removed.
+- **Files:** `src/embedder.py`, `pyproject.toml`
+- **Change:** Dual-mode embedder via HuggingFace transformers. `use_onnx: bool = False` param. ONNX activated when `use_onnx=True` — uses Optimum ORTModel with automatic ONNX export. ONNX deps are default dependencies.
 - **How it works:** DINOv2 runs in two modes: (1) **PyTorch** — loads the `.pth` weights via torchvision, runs `model.forward()` on GPU with FP16 tensors. (2) **ONNX** — loads a pre-exported `.onnx` graph via `onnxruntime.InferenceSession` with CUDA execution provider. Both modes accept the same input (batch of normalized image tensors) and return the same output (L2-normalized embedding vectors). The ONNX path skips PyTorch's Python dispatch overhead and can fuse ops, but ONNX Runtime lacks flash attention — it materializes the full N×N attention matrix in VRAM (687MB for batch=16 at dim=384), which causes OOM on 2GB. With ≥4GB VRAM, the ONNX path is expected to be faster.
 - **Verdict:** Not viable on current 2GB GPU. See "Future: GPU Upgrade Path" section for plan.
 

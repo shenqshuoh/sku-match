@@ -5,8 +5,6 @@
 .git/
 
 # auto-generated
-__pycache__/
-*.pyc
 *.egg-info/
 .DS_Store
 

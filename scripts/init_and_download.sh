@@ -17,9 +17,10 @@ echo "=== Step 1: Stop API ==="
 systemctl stop sku-match || true
 sleep 2
 
-echo "=== Step 2: Wipe DB + Chroma ==="
+echo "=== Step 2: Wipe DB + Chroma + Log ==="
 rm -f "$DB_PATH"
 rm -rf "$CHROMA_PATH"
+> /tmp/sku-match-api.log
 
 echo "=== Step 3: Start API ==="
 systemctl start sku-match
@@ -110,7 +111,7 @@ for i in $(seq 1 120); do
         -H "X-API-Key: $API_KEY" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-pending = [s['skuId'] for s in data.get('data',{}).get('list',[]) if s.get('trainStatus') not in ('SUCCESS','FAILED')]
+pending = [s['skuId'] for s in data.get('data',{}).get('list',[]) if s.get('trainStatus') != 'SUCCESS' and not (s.get('trainStatus') or '').startswith('FAILED')]
 if pending:
     print(','.join(pending))
 else:

@@ -9,9 +9,11 @@ from PIL import Image
 from ultralytics import YOLOE
 
 from src.core import parse_detections
-from src.embedder import DINOv2Embedder
+from src.embedder import Embedder
 from src.image_utils import draw_annotations
-from src.indexer import SKUIndexer, score_matches
+from src.indexer import SKUIndexer, _softmax, concentration_score, score_matches
+from src.patch_store import PatchStore
+from src.reranker import rerank
 
 if TYPE_CHECKING:
     from api.services.image_storage import ImageStorage
@@ -24,13 +26,17 @@ class RecognitionService:
     def __init__(
         self,
         detector: YOLOE,
-        embedder: DINOv2Embedder,
+        embedder: Embedder,
         indexer: SKUIndexer,
         image_storage: "ImageStorage",
         det_conf: float = 0.25,
         imgsz: int = 1280,
         match_conf: float = 0.5,
         concentration_topk: int = 10,
+        patch_store: PatchStore | None = None,
+        use_reranking: bool = True,
+        rerank_top_k: int = 50,
+        rerank_blend_beta: float = 0.3,
     ):
         self.detector = detector
         self.embedder = embedder
@@ -40,6 +46,74 @@ class RecognitionService:
         self.imgsz = imgsz
         self.match_conf = match_conf
         self.concentration_topk = concentration_topk
+        self.patch_store = patch_store
+        self.use_reranking = use_reranking
+        self.rerank_top_k = rerank_top_k
+        self.rerank_blend_beta = rerank_blend_beta
+
+    def _score_with_reranking(
+        self,
+        detections: list,
+        search_results: list[tuple],
+        features_list: list,
+    ) -> list:
+        """Score detections using patch re-ranking with blended scoring.
+
+        For each detection:
+        1. Run patch re-ranking on the coarse candidates.
+        2. Apply softmax over blended scores to get a probability distribution.
+        3. Build SKUMatch results from the blended distribution.
+        """
+        from src.types import SKUMatch
+
+        all_matches = []
+        for det, (coarse_dist, rank_info, top_vectors), features in zip(
+            detections, search_results, features_list
+        ):
+            # Run re-ranking
+            rerank_results = rerank(
+                query_patches=features.patches,
+                patch_store=self.patch_store,
+                top_vectors=top_vectors,
+                blend_beta=self.rerank_blend_beta,
+            )
+
+            if not rerank_results:
+                # Fallback: no patch files available, use coarse scores
+                matches = score_matches([det], [(coarse_dist, rank_info, top_vectors)], self.indexer, self.concentration_topk)
+                all_matches.extend(matches)
+                continue
+
+            # Build blended distribution from rerank results
+            blended_scores = {r.sku_id: r.blended_score for r in rerank_results}
+            distribution = _softmax(blended_scores, self.indexer._temperature)
+
+            # Top-1 SKU from blended distribution
+            ranked = sorted(distribution.items(), key=lambda x: x[1], reverse=True)
+            sku_id, confidence = ranked[0]
+            sku_name = self.indexer.get_sku_name(sku_id) or sku_id
+            conc = concentration_score(distribution, top_k=self.concentration_topk)
+
+            # Get rank positions for the top SKU from coarse results
+            positions = rank_info.get(sku_id, [])
+            top2_ranks = (
+                (positions[0], positions[1]) if len(positions) >= 2
+                else (positions[0], 0) if len(positions) == 1
+                else (0, 0)
+            )
+
+            all_matches.append(SKUMatch(
+                detection=det,
+                sku_id=sku_id,
+                sku_name=sku_name,
+                match_score=confidence,
+                match_concentration=conc,
+                top2_ranks=top2_ranks,
+                sku_distribution=distribution,
+                top_vectors=top_vectors,
+            ))
+
+        return all_matches
 
     def recognize(
         self,
@@ -89,10 +163,22 @@ class RecognitionService:
             crop = Image.fromarray(image_np[y1:y2, x1:x2])
             crops.append(crop)
 
-        # Embed + search + score using shared pipeline
-        embeddings = self.embedder.embed_batch(crops)
-        search_results = self.indexer.search_batch(embeddings)
-        matches = score_matches(detections, search_results, self.indexer, self.concentration_topk)
+        # Extract features (CLS + patches in single forward pass)
+        features_list = self.embedder.extract_features_batch(crops)
+        embeddings = np.stack([self.embedder.features_to_embedding(f) for f in features_list])
+
+        # Stage 1: Coarse retrieval from ChromaDB
+        n_override = self.rerank_top_k if self.use_reranking and self.patch_store is not None else None
+        search_results = self.indexer.search_batch(embeddings, n_results_override=n_override)
+
+        if self.use_reranking and self.patch_store is not None:
+            # Stage 2: Patch re-ranking with blended scoring
+            matches = self._score_with_reranking(
+                detections, search_results, features_list,
+            )
+        else:
+            # Standard scoring pipeline
+            matches = score_matches(detections, search_results, self.indexer, self.concentration_topk)
 
         # Format results with API-specific threshold filtering
         counts: dict[str, int] = {}

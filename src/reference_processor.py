@@ -9,9 +9,10 @@ import numpy as np
 from PIL import Image
 from ultralytics import YOLOE
 
-from src.embedder import DINOv2Embedder
+from src.embedder import Embedder
 from src.indexer import SKUIndexer
 from src.masking import extract_binary_masks, mask_background
+from src.patch_store import PatchStore
 from src.utils import embedding_to_list
 
 logger = logging.getLogger(__name__)
@@ -53,18 +54,24 @@ class ReferenceProcessor:
     def __init__(
         self,
         detector: YOLOE,
-        embedder: DINOv2Embedder,
+        embedder: Embedder,
         indexer: SKUIndexer,
         device: str = "cpu",
         det_conf: float = 0.25,
+        imgsz: int = 640,
         use_mask: bool = False,
+        patch_store: PatchStore | None = None,
+        feature_type: str | None = None,
     ):
         self.detector = detector
         self.embedder = embedder
         self.indexer = indexer
         self.device = device
         self.det_conf = det_conf
+        self.imgsz = imgsz
         self.use_mask = use_mask
+        self.patch_store = patch_store
+        self.feature_type = feature_type
 
     def crop_reference(self, image_path: Path) -> Image.Image | None:
         """Detect the primary object in a reference image and return a cropped PIL Image.
@@ -78,6 +85,7 @@ class ReferenceProcessor:
             source=image_np,
             device=self.device,
             conf=self.det_conf,
+            imgsz=self.imgsz,
             retina_masks=False,
             verbose=False,
         )
@@ -133,8 +141,16 @@ class ReferenceProcessor:
             )
             return ProcessResult(success=False)
 
-        embedding = self.embedder.embed(crop)
-        self.indexer.add_reference(sku_id, sku_name, media_id, embedding, metadata)
+        # Extract features (CLS + patches) in a single forward pass
+        features = self.embedder.extract_features_batch([crop])[0]
+        embedding = self.embedder.features_to_embedding(features)
+
+        # Save patches for re-ranking if patch store is configured
+        if self.patch_store is not None:
+            doc_id = f"{sku_id}__{media_id}"
+            self.patch_store.save(doc_id, features.patches)
+
+        self.indexer.add_reference(sku_id, sku_name, media_id, embedding, metadata, feature_type=self.feature_type)
         logger.info("Cropped, embedded and indexed reference %s/%s", sku_id, media_id)
 
         # Save masked crop to temp file for Qiniu upload
@@ -201,7 +217,15 @@ class ReferenceProcessor:
                 logger.info("All images in batch %d-%d skipped", i + 1, min(i + batch_size, len(all_paths)))
                 continue
 
-            embeddings = self.embedder.embed_batch(crops)
+            # Extract features (CLS + patches) in a single forward pass
+            features_list = self.embedder.extract_features_batch(crops)
+            embeddings = np.stack([self.embedder.features_to_embedding(f) for f in features_list])
+
+            # Save patches if patch store is configured
+            if self.patch_store is not None:
+                for j, f in enumerate(features_list):
+                    doc_id = batch_meta[j][2]  # (sku_id, sku_name, doc_id)
+                    self.patch_store.save(doc_id, f.patches)
 
             ids = [m[2] for m in batch_meta]
             emb_list = [embedding_to_list(e) for e in embeddings]
@@ -209,6 +233,9 @@ class ReferenceProcessor:
                 {"sku_id": m[0], "sku_name": m[1], "enabled": True}
                 for m in batch_meta
             ]
+            if self.feature_type is not None:
+                for meta in metadatas:
+                    meta["feature_type"] = self.feature_type
 
             self.indexer.collection.add(ids=ids, embeddings=emb_list, metadatas=metadatas)
             total_added += len(crops)

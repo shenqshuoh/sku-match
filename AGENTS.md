@@ -19,7 +19,7 @@ sku-match/
 ├── src/
 │   ├── __init__.py           # Empty (no re-exports)
 │   ├── core.py               # CLI detection: detect(), parse_detections(), _save_result()
-│   ├── embedder.py           # DINOv2Embedder: auto device detect, FP16 on CUDA, optional ONNX backend
+│   ├── embedder.py           # Embedder: HuggingFace transformers + Optimum ONNX, auto device detect, FP16 on CUDA
 │   ├── indexer.py            # Chroma-backed SKUIndexer + score_matches(): build, add/delete/enable/search
 │   ├── matcher.py            # SKUMatcher: detection + SKU matching pipeline
 │   ├── types.py              # Dataclasses: Detection, SKUReference, SKUMatch
@@ -52,7 +52,6 @@ sku-match/
 ├── scripts/
 │   ├── build_index.py        # Build Chroma index from reference images
 │   ├── crop_reference.py     # Crop raw refs with YOLOE
-│   ├── export_onnx.py        # Export DINOv2 to ONNX format
 │   ├── init_and_download.sh  # Reinit DB + Chroma, add SKUs from reference/, download crops
 │   ├── sync_local.sh         # Sync from remote to local
 │   ├── sync_remote.sh        # Sync to remote server
@@ -73,9 +72,8 @@ sku-match/
 │   ├── images/               # Input images (CLI mode)
 │   ├── references/           # SKU reference images (sku_id/*.jpg)
 │   └── references_raw/       # Original photos to be cropped
-├── models/                   # YOLOE weights, DINOv2 .pth weights, mobileclip2_b.ts
+├── models/                   # YOLOE weights, mobileclip2_b.ts
 ├── vendor/
-│   ├── dinov2/               # Full DINOv2 source (vendored)
 │   └── clip_package/         # Vendored clip package (GFW-safe)
 ├── chroma_data/              # Chroma persistence (gitignored)
 ├── results/                  # API result images (annotated + downloads)
@@ -94,7 +92,7 @@ sku-match/
 | API auth | api/auth.py | API key verification + per-IP rate limiting (disabled by default) |
 | API DI | api/dependencies.py | Typed FastAPI dependency providers |
 | Detection logic | src/core.py | detect() function (CLI), parse_detections() shared |
-| DINOv2 embedder | src/embedder.py | 3 variants: vits14(384-dim), vitb14(768-dim), vitl14(1024-dim). Optional ONNX backend |
+| Image embedder | src/embedder.py | HuggingFace transformers DINOv2 (8 variants: small/base/large/giant ± registers). Optimum ONNX backend |
 | SKU indexer | src/indexer.py | Chroma-backed: search_batch, score_matches with top-2-per-SKU scoring |
 | Detection + matching | src/matcher.py | SKUMatcher class with crop saving |
 | Masking | src/masking.py | extract_binary_masks, mask_background with configurable background color |
@@ -123,12 +121,14 @@ sku-match/
 | parse_detections() | function | src/core.py:13 | Shared YOLOE box→Detection parsing |
 | detect() | function | src/core.py:45 | Core YOLOE inference (CLI) — batch prediction with crop saving |
 | _save_result() | function | src/core.py:99 | Save detection JSON + masked crops |
-| DINOv2Embedder | class | src/embedder.py:27 | DINOv2 embedding wrapper (FP16 on CUDA, optional ONNX backend) |
-| DINOv2Variant | type | src/embedder.py:15 | Literal type: "dinov2_vits14"/"dinov2_vitb14"/"dinov2_vitl14" |
-| DIMENSIONS | dict | src/embedder.py:16 | Model name → embedding dimension mapping |
-| DINOv2Embedder.embed() | method | src/embedder.py:104 | Embed single PIL Image → np.ndarray |
-| DINOv2Embedder.embed_batch() | method | src/embedder.py:107 | Embed batch of PIL Images → np.ndarray |
-| DINOv2Embedder.embed_path() | method | src/embedder.py:131 | Embed image from file path |
+| Embedder | class | src/embedder.py:60 | DINOv2 embedder via HuggingFace transformers + Optimum ONNX |
+| EmbedderProtocol | protocol | src/embedder.py:48 | Interface for SKU image embedders |
+| EmbedderVariant | type | src/embedder.py:25 | Literal type: 8 HF model IDs (small/base/large/giant ± registers) |
+| MODEL_DIMENSIONS | dict | src/embedder.py:11 | HF model ID → embedding dimension mapping |
+| Embedder.embed() | method | src/embedder.py:96 | Embed single PIL Image → np.ndarray |
+| Embedder.embed_batch() | method | src/embedder.py:99 | Embed batch of PIL Images → np.ndarray |
+| Embedder.embed_path() | method | src/embedder.py:115 | Embed image from file path |
+| Embedder.to() | method | src/embedder.py:93 | Move model to specified device |
 | VectorMatch | class | src/indexer.py:22 | Single vector-level match result (sku_id, similarity, rank, media_url) |
 | SKUIndexer | class | src/indexer.py:112 | Chroma-backed SKU index with top-2 scoring |
 | EPSILON | constant | src/indexer.py:17 | Small score for unranked SKUs in softmax (1e-8) |
@@ -243,7 +243,7 @@ sku-match/
 | `uv run sku-match --detection-only` | main.py | Detection only mode |
 | `uv run sku-match --det-model X --emb-model Y` | main.py | Custom models |
 | `uv run sku-match-api` | api/app.py | Start API server |
-| `uv run python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitb14` | build_index.py | Build Chroma index |
+| `uv run python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-base` | build_index.py | Build Chroma index |
 | `uv run python scripts/crop_reference.py -r data/references_raw/ -o data/references/` | crop_reference.py | Crop raw reference photos |
 | `uv run python tests/test_detection.py` | test_detection.py | Smoke tests |
 
@@ -261,7 +261,7 @@ sku-match/
 - **Async pattern**: CPU/GPU-bound work runs via `asyncio.to_thread()` or `loop.run_in_executor()` to avoid blocking event loop
 - **GPU concurrency**: API uses dedicated `ThreadPoolExecutor(max_workers=1)` for GPU inference
 - **Warm-up**: YOLOE warm-up prediction runs at API startup (dummy 640x640 image)
-- **FP16**: Both YOLOE and DINOv2 use `model.half()` at load time when device=cuda
+- **FP16**: YOLOE uses `model.half()` at load time; Embedder loads with `torch_dtype=torch.float16` when device=cuda
 - **CJK rendering**: Annotations use PIL + Noto Sans CJK font for Chinese character support
 - **Qiniu CDN**: Annotated images uploaded to Qiniu, `matched_image` returns full CDN URL. Falls back to local path with `qiniu_upload_failed=True` flag on failure.
 - **DB pool**: SQLAlchemy pool_size=5, max_overflow=10, pool_recycle=3600, pool_pre_ping=True
@@ -281,7 +281,7 @@ sku-match/
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
-- **sys.path hack**: tests/test_detection.py, scripts/, and scripts/export_onnx.py manipulate sys.path
+- **sys.path hack**: tests/test_detection.py and scripts/ manipulate sys.path
 - **No docstrings**: Minimal documentation on most functions
 - **GFW vendor hacks**: clip vendored locally, mobileclip2_b.ts tracked in models/, aliyun PyPI mirror configured
 
@@ -301,7 +301,7 @@ uv run sku-match
 uv run sku-match --conf 0.3 --match-conf 0.5 --match-concentration 0.0 --match-verbose
 
 # CLI: Custom models
-uv run sku-match --det-model models/yoloe-26l-seg.pt --emb-model dinov2_vitb14
+uv run sku-match --det-model models/yoloe-26l-seg.pt --emb-model facebook/dinov2-base
 
 # CLI: FP16 + ONNX mode (GPU only)
 uv run sku-match --swap --onnx
@@ -322,16 +322,13 @@ MATCH_CONF=0.5 uv run sku-match-api
 QINIU_ACCESS_KEY=xxx QINIU_SECRET_KEY=xxx QINIU_BUCKET=xxx uv run sku-match-api
 
 # Build Chroma index from reference images
-uv run python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vitb14
+uv run python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-base
 
 # Build index with different embedding model
-uv run python scripts/build_index.py -r data/references/ -o chroma_data/ -m dinov2_vits14
+uv run python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-small
 
 # Crop raw reference photos
 uv run python scripts/crop_reference.py -r data/references_raw/ -o data/references/
-
-# Export DINOv2 to ONNX
-uv run python scripts/export_onnx.py --model dinov2_vits14
 
 # Run smoke test
 uv run python tests/test_detection.py
@@ -349,19 +346,19 @@ apt-get install fonts-noto-cjk
 ## NOTES
 
 - **Default mode**: SKU matching (not detection-only)
-- **Embedding models**: dinov2_vits14 (384-dim, default), dinov2_vitb14 (768-dim), dinov2_vitl14 (1024-dim)
+- **Embedding models**: facebook/dinov2-small (384-dim, default API), facebook/dinov2-base (768-dim, default CLI), facebook/dinov2-large (1024-dim), facebook/dinov2-giant (1536-dim). Also available with registers: *-with-registers variants.
 - **Chroma index**: PersistentClient with HNSW cosine similarity. Incremental add/delete — no full rebuild needed. Unified path: `chroma_data/` across CLI, API, and build scripts.
 - **Match scoring**: Top-2-per-SKU cosine similarity sum → softmax probability distribution (0–1 range). `MATCH_CONF` default 0 (disabled). Concentration score (top-1 share of top-K probability mass). Detection rank positions (top2_ranks) tracked per match.
 - **Device auto-detect**: `detect_device()` returns cuda → mps → cpu
-- **First run**: Downloads YOLOE model (~400MB). DINOv2 weights vendored locally at models/*.pth (no download needed).
+- **First run**: Downloads YOLOE model (~400MB). DINOv2 weights downloaded from HuggingFace Hub on first use (~85–330MB depending on variant), cached in ~/.cache/huggingface/.
 - **API state**: Models loaded once at FastAPI lifespan startup, reused across requests. Services accessed via typed DI providers in `api/dependencies.py`.
 - **ReferenceProcessor**: Unified crop→embed→index pipeline. Crops via YOLOE detection + mask isolation, falls back to skipping if no detection. Used by API routes for new SKU and media add.
 - **Masking module**: `src/masking.py` — configurable background color (default ImageNet mean RGB). Used by CLI detection and reference processor.
 - **Detection confidence**: `--conf` flag (CLI) and `DET_CONF` setting (API) control YOLOE detection threshold. Passed to `predict(conf=)`. retina_masks=False to prevent OOM on high-res images.
 - **GFW compatibility**: `clip` vendored locally at `vendor/clip_package/`. `mobileclip2_b.ts` in `models/` avoids GitHub download. PyPI via aliyun mirror.
 - **FP16 inference**: Both YOLOE and DINOv2 use model.half() at load time when device=cuda. ~1.8x speedup over FP32 on L20 GPU.
-- **ONNX backend**: Optional via --onnx flag / USE_ONNX setting. Export with scripts/export_onnx.py. Currently not viable on 2GB GPU (ONNX Runtime lacks flash attention).
-- **DINOv2 vendoring**: Full dinov2 source at vendor/dinov2/ + weights at models/dinov2_*_pretrain.pth. No internet needed at runtime.
+- **ONNX backend**: Optional via --onnx flag / USE_ONNX setting. Uses Optimum ORTModelForFeatureExtraction with on-the-fly ONNX export. CUDA provider on GPU, CPU provider otherwise.
+- **Embedder**: HuggingFace transformers AutoModel + AutoImageProcessor. 8 variants (small/base/large/giant ± registers). Weights from HuggingFace Hub or local path.
 - **Performance**: See docs/PERF_PLAN.md for optimization details. FP16 ~1.8x faster. GPU thread pool prevents OOM under concurrent load.
 - **Qiniu integration**: Annotated result images uploaded to Qiniu cloud storage. Token cached until 60s before deadline. Key format: `sku-match/{YYYY-MM/DD}/{filename}`. Region: South China (z2). CDN URL rewrite for faster domestic downloads (iovip origin pull).
 - **API auth**: Optional API key authentication via `X-API-Key` header. Rate limiting per-IP (requests/minute). Both disabled by default (empty API_KEY, RATE_LIMIT=0).

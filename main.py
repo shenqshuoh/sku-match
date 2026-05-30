@@ -179,9 +179,18 @@ def main():
     parser.add_argument(
         "--emb-model",
         type=str,
-        choices=["dinov2_vits14", "dinov2_vitb14", "dinov2_vitl14"],
-        default="dinov2_vits14",
-        help="DINOv2 embedding model variant (default: dinov2_vits14)",
+        choices=[
+            "facebook/dinov2-small",
+            "facebook/dinov2-base",
+            "facebook/dinov2-large",
+            "facebook/dinov2-giant",
+            "facebook/dinov2-small-with-registers",
+            "facebook/dinov2-base-with-registers",
+            "facebook/dinov2-large-with-registers",
+            "facebook/dinov2-giant-with-registers",
+        ],
+        default="facebook/dinov2-small",
+        help="Embedding model variant (default: facebook/dinov2-small)",
     )
     parser.add_argument(
         "--device",
@@ -238,7 +247,7 @@ def main():
     parser.add_argument(
         "--onnx",
         action="store_true",
-        help="Use ONNX Runtime for DINOv2 embedding instead of PyTorch (requires .onnx model file).",
+        help="Use ONNX Runtime for embedding via Optimum (requires optimum + onnxruntime).",
     )
 
     args = parser.parse_args()

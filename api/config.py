@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.embedder import DINOv2Variant
+from src.embedder import EmbedderVariant
 
 
 class Settings(BaseSettings):
@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./sku_match.db"
 
     DET_MODEL: str = "models/yoloe-26l-seg.pt"
-    EMB_MODEL: DINOv2Variant = "dinov2_vits14"
+    EMB_MODEL: EmbedderVariant = "facebook/dinov2-base"
     DEVICE: str | None = None
 
     DET_CONF: float = 0.25
@@ -20,12 +20,26 @@ class Settings(BaseSettings):
     CONCENTRATION_TOPK: int = 10
     USE_ONNX: bool = False
 
+    # Feature extraction
+    USE_FUSED_FEATURES: bool = True
+    FUSE_ALPHA: float = 0.5
+    GEM_P: float = 3.0
+
+    # Patch re-ranking
+    USE_RERANKING: bool = True
+    RERANK_TOP_K: int = 50
+    RERANK_BLEND_BETA: float = 0.5
+
+    # Patch storage
+    PATCH_DIR: str = "data/patches"
+
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     DEBUG: bool = False
 
     DOWNLOAD_TIMEOUT: int = 30
     RESULTS_MAX_AGE_HOURS: int = 24  # Annotated images older than this are cleaned up
+    LOG_FILE: str = "/tmp/sku-match-api.log"  # File-based log for init script crop downloads
 
     API_KEY: str = ""  # Empty = auth disabled
     RATE_LIMIT: int = 0  # Requests per minute per IP; 0 = disabled
@@ -36,7 +50,7 @@ class Settings(BaseSettings):
     QINIU_IOVIP_URL: str = "http://iovip-z2.qiniuio.com"
     QINIU_KEY_PREFIX: str = "sku-match/"
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()

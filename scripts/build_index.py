@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PIL import Image
 
-from src.embedder import DINOv2Embedder, DINOv2Variant
+from src.embedder import Embedder, EmbedderVariant
 from src.indexer import SKUIndexer
 from src.utils import detect_device as _detect_device
 from src.types import SKUReference
@@ -16,13 +16,13 @@ from src.types import SKUReference
 def build_reference_index(
     reference_dir: Path,
     output_dir: Path,
-    model_name: DINOv2Variant = "dinov2_vitb14",
+    model_name: EmbedderVariant = "facebook/dinov2-base",
     device: str | None = None,
     batch_size: int = 16,
 ) -> None:
     if device is None:
         device = _detect_device()
-    embedder = DINOv2Embedder(model_name=model_name, device=device)
+    embedder = Embedder(model_name=model_name, device=device)
 
     all_image_paths: list[Path] = []
     all_sku_ids: list[str] = []
@@ -92,9 +92,18 @@ def main():
         "-m",
         "--model",
         type=str,
-        choices=["dinov2_vits14", "dinov2_vitb14", "dinov2_vitl14"],
-        default="dinov2_vitb14",
-        help="Embedding model variant (default: dinov2_vitb14)",
+        choices=[
+            "facebook/dinov2-small",
+            "facebook/dinov2-base",
+            "facebook/dinov2-large",
+            "facebook/dinov2-giant",
+            "facebook/dinov2-small-with-registers",
+            "facebook/dinov2-base-with-registers",
+            "facebook/dinov2-large-with-registers",
+            "facebook/dinov2-giant-with-registers",
+        ],
+        default="facebook/dinov2-base",
+        help="Embedding model variant (default: facebook/dinov2-base)",
     )
     parser.add_argument(
         "--device",

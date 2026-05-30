@@ -10,6 +10,7 @@ from fastapi import Request
 from api.services.image_storage import ImageStorage
 from api.services.recognition import RecognitionService
 from src.indexer import SKUIndexer
+from src.patch_store import PatchStore
 from src.reference_processor import ReferenceProcessor
 
 
@@ -31,6 +32,10 @@ def get_image_storage(request: Request) -> ImageStorage:
 
 def get_inference_executor(request: Request) -> concurrent.futures.ThreadPoolExecutor:
     return request.app.state.inference_executor
+
+
+def get_patch_store(request: Request) -> PatchStore | None:
+    return request.app.state.patch_store
 
 
 def get_device(request: Request) -> str:

@@ -9,7 +9,7 @@ from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.core import parse_detections
-from src.embedder import DINOv2Embedder, DINOv2Variant
+from src.embedder import Embedder, EmbedderVariant
 from src.image_utils import save_crop
 from src.indexer import SKUIndexer, score_matches
 from src.types import Detection, SKUMatch
@@ -22,7 +22,7 @@ class SKUMatcher:
     def __init__(
         self,
         indexer: SKUIndexer,
-        embedder: DINOv2Embedder,
+        embedder: Embedder,
         detector: YOLOE,
         confidence_threshold: float = 0.5,
         concentration_threshold: float = 0.0,
@@ -63,9 +63,7 @@ class SKUMatcher:
             self.detector.model.cpu()
             del self.detector
             torch.cuda.empty_cache()
-            if self.embedder.model is not None:
-                self.embedder.model.to(self._device)
-            self.embedder.device = self._device
+            self.embedder.to(self._device)
 
         free_gpu_memory()
 
@@ -156,7 +154,7 @@ class SKUMatcher:
         cls,
         index_dir: Path,
         det_model: str = "models/yoloe-26l-seg.pt",
-        emb_model: DINOv2Variant = "dinov2_vitb14",
+        emb_model: EmbedderVariant | str = "facebook/dinov2-base",
         device: str | None = None,
         confidence_threshold: float = 0.5,
         concentration_threshold: float = 0.0,
@@ -170,7 +168,7 @@ class SKUMatcher:
 
         # When swap is enabled, load embedder on CPU first — moved to GPU after detection
         emb_device = "cpu" if swap_models and device != "cpu" else device
-        embedder = DINOv2Embedder(model_name=emb_model, device=emb_device, use_onnx=use_onnx)
+        embedder = Embedder(model_name=emb_model, device=emb_device, use_onnx=use_onnx)
         indexer = SKUIndexer()
         indexer.init_collection(persist_dir=index_dir)
 
