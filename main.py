@@ -74,6 +74,7 @@ def run_matching(args):
             embedder=matcher.embedder,
             indexer=matcher.indexer,
             device=device,
+            crop_model_path=args.crop_model or None,
         )
         count = processor.build_from_directory(ref_dir, batch_size=args.batch)
         if count == 0:
@@ -175,6 +176,12 @@ def main():
         type=str,
         default="models/yoloe-26l-seg.pt",
         help="YOLOE detection model path (default: models/yoloe-26l-seg.pt)",
+    )
+    parser.add_argument(
+        "--crop-model",
+        type=str,
+        default="",
+        help="YOLOE model for cropping reference images (default: same as --det-model)",
     )
     parser.add_argument(
         "--emb-model",

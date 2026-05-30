@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./sku_match.db"
 
     DET_MODEL: str = "models/yoloe-26l-seg.pt"
+    CROP_MODEL: str = ""  # Model for cropping reference images; empty = use DET_MODEL (loaded on-demand, unloaded after)
     EMB_MODEL: EmbedderVariant = "facebook/dinov2-base"
     DEVICE: str | None = None
 

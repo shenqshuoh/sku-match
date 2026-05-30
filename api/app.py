@@ -50,6 +50,8 @@ async def lifespan(app: FastAPI):
     logger.info("Loading YOLOE detector: %s", settings.DET_MODEL)
     detector = YOLOE(settings.DET_MODEL)
     detector.set_classes(BEVERAGE_CONTAINER_CLASSES)
+
+    # Convert detector to FP16 for faster inference on CUDA
     if device == "cuda":
         import torch
         detector.model.half()
@@ -110,6 +112,13 @@ async def lifespan(app: FastAPI):
         qiniu_iovip_url=settings.QINIU_IOVIP_URL,
         qiniu_key_prefix=settings.QINIU_KEY_PREFIX,
     )
+    # Resolve crop model: empty string means reuse DET_MODEL (no separate loading)
+    crop_model_path = settings.CROP_MODEL or None
+    if crop_model_path:
+        logger.info("Crop model: %s (on-demand)", crop_model_path)
+    else:
+        logger.info("Crop model: using DET_MODEL")
+
     processor = ReferenceProcessor(
         detector=detector,
         embedder=embedder,
@@ -117,6 +126,7 @@ async def lifespan(app: FastAPI):
         device=device,
         patch_store=patch_store,
         feature_type=feature_type,
+        crop_model_path=crop_model_path,
     )
     recognition_service = RecognitionService(
         detector=detector,

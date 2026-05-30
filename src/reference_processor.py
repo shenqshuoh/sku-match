@@ -9,11 +9,12 @@ import numpy as np
 from PIL import Image
 from ultralytics import YOLOE
 
+from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.embedder import Embedder
 from src.indexer import SKUIndexer
 from src.masking import extract_binary_masks, mask_background
 from src.patch_store import PatchStore
-from src.utils import embedding_to_list
+from src.utils import embedding_to_list, free_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class ReferenceProcessor:
         use_mask: bool = False,
         patch_store: PatchStore | None = None,
         feature_type: str | None = None,
+        crop_model_path: str | None = None,
     ):
         self.detector = detector
         self.embedder = embedder
@@ -72,6 +74,40 @@ class ReferenceProcessor:
         self.use_mask = use_mask
         self.patch_store = patch_store
         self.feature_type = feature_type
+        self.crop_model_path = crop_model_path
+
+    def _crop_detect(self, image_np: np.ndarray):
+        """Run detection for cropping. Uses on-demand crop model if configured."""
+        if self.crop_model_path:
+            temp_model = YOLOE(self.crop_model_path)
+            temp_model.set_classes(BEVERAGE_CONTAINER_CLASSES)
+            try:
+                # On-demand crop model runs in FP32 to avoid fuse_conv_and_bn
+                # crash on models with many BatchNorm layers (e.g. yoloe-26x).
+                # FP16 speedup is negligible for a single on-demand inference.
+                results = temp_model.predict(
+                    source=image_np,
+                    device=self.device,
+                    conf=self.det_conf,
+                    imgsz=self.imgsz,
+                    retina_masks=False,
+                    verbose=False,
+                )
+                return results[0]
+            finally:
+                del temp_model
+                free_gpu_memory()
+        else:
+            # Startup detector is already FP16 via model.half() — no half= kwarg
+            results = self.detector.predict(
+                source=image_np,
+                device=self.device,
+                conf=self.det_conf,
+                imgsz=self.imgsz,
+                retina_masks=False,
+                verbose=False,
+            )
+            return results[0]
 
     def crop_reference(self, image_path: Path) -> Image.Image | None:
         """Detect the primary object in a reference image and return a cropped PIL Image.
@@ -81,15 +117,7 @@ class ReferenceProcessor:
         image = Image.open(image_path).convert("RGB")
         image_np = np.array(image)
 
-        results = self.detector.predict(
-            source=image_np,
-            device=self.device,
-            conf=self.det_conf,
-            imgsz=self.imgsz,
-            retina_masks=False,
-            verbose=False,
-        )
-        result = results[0]
+        result = self._crop_detect(image_np)
 
         if result.boxes is None or len(result.boxes) == 0:
             logger.warning("No detections in reference image: %s", image_path)
