@@ -93,6 +93,7 @@ async def lifespan(app: FastAPI):
 
     # Validate feature type compatibility
     indexer.validate_feature_type(feature_type)
+    indexer.validate_emb_model(settings.EMB_MODEL)
 
     # Initialize patch store for re-ranking
     patch_store: PatchStore | None = None

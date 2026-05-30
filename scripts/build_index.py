@@ -7,16 +7,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PIL import Image
 
-from src.embedder import Embedder, EmbedderVariant
+from src.embedder import DEFAULT_EMB_MODEL, Embedder
 from src.indexer import SKUIndexer
-from src.utils import detect_device as _detect_device
 from src.types import SKUReference
+from src.utils import detect_device as _detect_device
 
 
 def build_reference_index(
     reference_dir: Path,
     output_dir: Path,
-    model_name: EmbedderVariant = "facebook/dinov2-base",
+    model_name: str = DEFAULT_EMB_MODEL,
     device: str | None = None,
     batch_size: int = 16,
 ) -> None:
@@ -64,6 +64,7 @@ def build_reference_index(
     indexer = SKUIndexer()
     indexer.init_collection(persist_dir=output_dir)
     indexer.build(references)
+    indexer.set_emb_model(model_name)
 
     total_refs = len(references)
     unique_skus = len({r.sku_id for r in references})
@@ -92,18 +93,8 @@ def main():
         "-m",
         "--model",
         type=str,
-        choices=[
-            "facebook/dinov2-small",
-            "facebook/dinov2-base",
-            "facebook/dinov2-large",
-            "facebook/dinov2-giant",
-            "facebook/dinov2-small-with-registers",
-            "facebook/dinov2-base-with-registers",
-            "facebook/dinov2-large-with-registers",
-            "facebook/dinov2-giant-with-registers",
-        ],
-        default="facebook/dinov2-base",
-        help="Embedding model variant (default: facebook/dinov2-base)",
+        default=DEFAULT_EMB_MODEL,
+        help=f"Path to local embedding model directory (default: {DEFAULT_EMB_MODEL})",
     )
     parser.add_argument(
         "--device",

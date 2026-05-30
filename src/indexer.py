@@ -279,6 +279,36 @@ class SKUIndexer:
                 f"Rebuild the index or change the feature mode setting."
             )
 
+    def validate_emb_model(self, expected_model: str) -> None:
+        """Validate that the index was built with the expected embedding model.
+
+        Checks the ``emb_model`` field in the Chroma collection metadata against
+        the expected model path.  Raises RuntimeError on mismatch.  Collections
+        without the metadata field (pre-existing) pass validation with a warning.
+
+        Args:
+            expected_model: Path to the expected embedding model directory.
+        """
+        meta = self.collection.metadata
+        if not meta or "emb_model" not in meta:
+            logger.warning(
+                "ChromaDB collection has no emb_model metadata — skipping model validation. "
+                "Rebuild the index to enable this check."
+            )
+            return
+
+        actual = meta["emb_model"]
+        if actual != expected_model:
+            raise RuntimeError(
+                f"ChromaDB index was built with '{actual}' but config expects '{expected_model}'. "
+                f"Rebuild the index or change the model setting."
+            )
+
+    def set_emb_model(self, model: str) -> None:
+        """Store the embedding model identity in the Chroma collection metadata."""
+        self.collection.modify(metadata={"emb_model": model})
+        logger.info("Set collection emb_model metadata: %s", model)
+
     def search(self, query_embedding: np.ndarray) -> tuple[dict[str, float], dict[str, list[int]]]:
         results = self.search_batch(query_embedding.reshape(1, -1))
         return results[0]

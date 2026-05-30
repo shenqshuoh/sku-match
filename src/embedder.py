@@ -1,6 +1,7 @@
+import json
 import logging
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -12,29 +13,9 @@ from src.utils import detect_device
 
 logger = logging.getLogger(__name__)
 
-MODEL_DIMENSIONS: dict[str, int] = {
-    "facebook/dinov2-small": 384,
-    "facebook/dinov2-base": 768,
-    "facebook/dinov2-large": 1024,
-    "facebook/dinov2-giant": 1536,
-    "facebook/dinov2-small-with-registers": 384,
-    "facebook/dinov2-base-with-registers": 768,
-    "facebook/dinov2-large-with-registers": 1024,
-    "facebook/dinov2-giant-with-registers": 1536,
-}
+DEFAULT_EMB_MODEL = "models/dinov2-base"
 
-EmbedderVariant = Literal[
-    "facebook/dinov2-small",
-    "facebook/dinov2-base",
-    "facebook/dinov2-large",
-    "facebook/dinov2-giant",
-    "facebook/dinov2-small-with-registers",
-    "facebook/dinov2-base-with-registers",
-    "facebook/dinov2-large-with-registers",
-    "facebook/dinov2-giant-with-registers",
-]
-
-__all__ = ["Embedder", "EmbedderProtocol", "EmbedderVariant", "MODEL_DIMENSIONS"]
+__all__ = ["Embedder", "EmbedderProtocol", "DEFAULT_EMB_MODEL"]
 
 # Preprocessing config to match the original 518x518 input
 _PROCESSOR_KWARGS = {
@@ -56,29 +37,12 @@ class EmbedderProtocol(Protocol):
     def to(self, device: str) -> None: ...
 
 
-def _resolve_model_path(model_name: str) -> str:
-    """Resolve a HF Hub model ID to a local directory if one exists.
-
-    Checks (in order):
-      1. model_name itself (if it's already a path)
-      2. models/<short_name>  (e.g. facebook/dinov2-small → models/dinov2-small)
-    Falls back to the original model_name for HF Hub / cache resolution.
-    """
-    if Path(model_name).is_dir():
-        return model_name
-    local = Path("models") / model_name.split("/")[-1]
-    if local.is_dir():
-        logger.info("Using local model: %s → %s", model_name, local)
-        return str(local)
-    return model_name
-
-
 class Embedder:
     """DINOv2 image embedder backed by HuggingFace transformers + Optimum ONNX."""
 
     def __init__(
         self,
-        model_name: EmbedderVariant | str = "facebook/dinov2-base",
+        model_name: str = DEFAULT_EMB_MODEL,
         device: str | None = None,
         use_onnx: bool = False,
         use_fused: bool = False,
@@ -88,31 +52,35 @@ class Embedder:
         if device is None:
             device = detect_device()
 
-        if model_name not in MODEL_DIMENSIONS:
-            raise ValueError(
-                f"Unknown embedding model: {model_name}. "
-                f"Supported: {sorted(MODEL_DIMENSIONS.keys())}"
+        model_path = Path(model_name)
+        if not model_path.is_dir():
+            raise FileNotFoundError(
+                f"Embedding model directory not found: {model_name}"
             )
+
+        # Read embedding dimension from model config
+        config_path = model_path / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"Model config not found: {config_path}"
+            )
+        self.dim = json.loads(config_path.read_text())["hidden_size"]
 
         self.model_name = model_name
         self.device = device
-        self.dim = MODEL_DIMENSIONS[model_name]
         self._use_onnx = use_onnx
         self._use_fused = use_fused
         self._fuse_alpha = fuse_alpha
         self._gem_p = gem_p
 
-        # Resolve local path before loading (avoids HF Hub network access)
-        resolved = _resolve_model_path(model_name)
-
         logger.info(
-            "Embedder initializing: model=%s, resolved=%s, device=%s, dim=%d, onnx=%s, fused=%s, alpha=%s",
-            model_name, resolved, device, self.dim, use_onnx, use_fused, fuse_alpha,
+            "Embedder initializing: model=%s, device=%s, dim=%d, onnx=%s, fused=%s, alpha=%s",
+            model_name, device, self.dim, use_onnx, use_fused, fuse_alpha,
         )
 
         # Shared image processor for both backends
         self._processor = AutoImageProcessor.from_pretrained(
-            resolved, local_files_only=True, **_PROCESSOR_KWARGS,
+            model_name, local_files_only=True, **_PROCESSOR_KWARGS,
         )
 
         if use_onnx:
@@ -123,12 +91,12 @@ class Embedder:
                 else "CPUExecutionProvider"
             )
             self._model = ORTModelForFeatureExtraction.from_pretrained(
-                resolved, export=True, provider=provider, local_files_only=True,
+                model_name, export=True, provider=provider, local_files_only=True,
             )
         else:
             dtype = torch.float16 if device == "cuda" else torch.float32
             self._model = AutoModel.from_pretrained(
-                resolved, dtype=dtype, local_files_only=True,
+                model_name, dtype=dtype, local_files_only=True,
             )
             self._model.eval()
             if device != "cpu":

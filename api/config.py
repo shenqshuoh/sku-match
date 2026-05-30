@@ -1,7 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.embedder import EmbedderVariant
-
 
 class Settings(BaseSettings):
     DATA_DIR: str = "data"
@@ -12,7 +10,7 @@ class Settings(BaseSettings):
 
     DET_MODEL: str = "models/yoloe-26l-seg.pt"
     CROP_MODEL: str = ""  # Model for cropping reference images; empty = use DET_MODEL (loaded on-demand, unloaded after)
-    EMB_MODEL: EmbedderVariant = "facebook/dinov2-base"
+    EMB_MODEL: str = "models/dinov2-with-registers-base"
     DEVICE: str | None = None
 
     DET_CONF: float = 0.25

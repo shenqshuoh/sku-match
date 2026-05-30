@@ -9,7 +9,7 @@ from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
 from src.core import parse_detections
-from src.embedder import Embedder, EmbedderVariant
+from src.embedder import DEFAULT_EMB_MODEL, Embedder
 from src.image_utils import save_crop
 from src.indexer import SKUIndexer, score_matches
 from src.types import Detection, SKUMatch
@@ -154,7 +154,7 @@ class SKUMatcher:
         cls,
         index_dir: Path,
         det_model: str = "models/yoloe-26l-seg.pt",
-        emb_model: EmbedderVariant | str = "facebook/dinov2-base",
+        emb_model: str = DEFAULT_EMB_MODEL,
         device: str | None = None,
         confidence_threshold: float = 0.5,
         concentration_threshold: float = 0.0,
@@ -171,6 +171,7 @@ class SKUMatcher:
         embedder = Embedder(model_name=emb_model, device=emb_device, use_onnx=use_onnx)
         indexer = SKUIndexer()
         indexer.init_collection(persist_dir=index_dir)
+        indexer.validate_emb_model(emb_model)
 
         detector = YOLOE(det_model)
         detector.set_classes(BEVERAGE_CONTAINER_CLASSES)
