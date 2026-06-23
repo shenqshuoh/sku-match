@@ -160,34 +160,94 @@ done
 
 echo ""
 echo "=== Step 5: Wait for embedding tasks ==="
-for i in $(seq 1 120); do
-    pending=$(curl -sf "$API_URL/api/v1/goods/sku/list?page=1&size=9999" \
+
+# Event-driven output: print a line only when a SKU reaches a terminal state.
+# Heartbeat every ~30s so the terminal isn't silent.
+declare -A seen=()
+done_count=0
+total_skus=0
+poll_max=120
+
+for i in $(seq 1 "$poll_max"); do
+    # Fetch all SKUs. Output: "total<TAB>processing" then one line per terminal SKU:
+    # "status<TAB>sku_id<TAB>sku_name<TAB>media_count"
+    output=$(curl -sf "$API_URL/api/v1/goods/sku/list?page=1&size=9999" \
         -H "X-API-Key: $API_KEY" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-pending = [s['skuId'] for s in data.get('data',{}).get('list',[]) if s.get('trainStatus') != 'SUCCESS' and not (s.get('trainStatus') or '').startswith('FAILED')]
-if pending:
-    print(','.join(pending))
-else:
-    print('')
+skus = data.get('data', {}).get('list', [])
+
+def terminal(st):
+    st = st or ''
+    return st == 'SUCCESS' or st.startswith('FAILED')
+
+processing = sum(1 for s in skus if not terminal(s.get('trainStatus')))
+print(f'{len(skus)}\t{processing}')
+for s in skus:
+    st = s.get('trainStatus') or ''
+    if terminal(st):
+        print(f'{st}\t{s[\"skuId\"]}\t{s.get(\"skuName\", \"\")}\t{len(s.get(\"medias\", []))}')
 " 2>/dev/null)
-    if [ -z "$pending" ]; then
-        echo "All embedding tasks completed."
+
+    IFS=$'\t' read -r total_skus processing <<< "$(echo "$output" | head -1)"
+
+    # Print only newly-terminal SKUs
+    new=0
+    while IFS=$'\t' read -r st sid sname mcount; do
+        [ -z "$st" ] && continue
+        [ -n "${seen[$sid]+isset}" ] && continue
+        seen[$sid]=1
+        done_count=$((done_count + 1))
+        new=$((new + 1))
+        if [ "$st" = "SUCCESS" ]; then
+            echo "  [$done_count/$total_skus] ✓ $sid  ($mcount imgs)"
+        else
+            echo "  [$done_count/$total_skus] ✗ $sid  $st"
+        fi
+    done < <(echo "$output" | tail -n +2)
+
+    if [ "${processing:-0}" -eq 0 ] 2>/dev/null; then
+        echo "All embedding tasks completed ($done_count/$total_skus)."
         break
     fi
-    echo "  Still pending: $pending ($i/120)"
+
+    # Heartbeat every 6 polls (~30s) when nothing new happened
+    if [ "$new" -eq 0 ] && [ $((i % 6)) -eq 0 ]; then
+        echo "  [$done_count/$total_skus done, $processing still embedding, poll $i/$poll_max]"
+    fi
+
     sleep 5
 done
 
 echo ""
-echo "=== Final SKU status ==="
+echo "=== Embedding Results ==="
 curl -sf "$API_URL/api/v1/goods/sku/list?page=1&size=9999" \
     -H "X-API-Key: $API_KEY" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for s in data.get('data',{}).get('list',[]):
-    media_count = len(s.get('medias',[]))
-    print(f\"  {s['skuId']:4s}  {s['trainStatus']:10s}  {media_count:3d} medias  {s['skuName']}\")
+skus = data.get('data', {}).get('list', [])
+
+def terminal(st):
+    st = st or ''
+    return st == 'SUCCESS' or st.startswith('FAILED')
+
+success = [s for s in skus if (s.get('trainStatus') or '') == 'SUCCESS']
+failed  = [s for s in skus if (s.get('trainStatus') or '').startswith('FAILED')]
+pending = [s for s in skus if not terminal(s.get('trainStatus'))]
+
+if success:
+    print(f'  ✓ SUCCESS:  {len(success):3d} SKUs')
+if failed:
+    print(f'  ✗ FAILED:   {len(failed):3d} SKUs')
+    for s in failed:
+        imgs = len(s.get('medias', []))
+        print(f'      {s[\"skuId\"]:<24s}  {s.get(\"trainStatus\", \"\")}  ({imgs} imgs)  {s.get(\"skuName\", \"\")}')
+if pending:
+    print(f'  ⏳ PENDING:  {len(pending):3d} SKUs (not yet completed)')
+    for s in pending:
+        print(f'      {s[\"skuId\"]:<24s}  {s.get(\"skuName\", \"\")}')
+print()
+print(f'  Total: {len(skus)} SKUs')
 "
 
 echo ""
