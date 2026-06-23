@@ -5,7 +5,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from transformers import AutoImageProcessor, AutoModel
 
 from src.features import Features, fused_embedding
@@ -126,7 +126,7 @@ class Embedder:
 
     def embed_path(self, path: Path) -> np.ndarray:
         """Embed an image from a file path."""
-        image = Image.open(path).convert("RGB")
+        image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
         return self.embed(image)
 
     def extract_features_batch(self, images: list[Image.Image]) -> list[Features]:

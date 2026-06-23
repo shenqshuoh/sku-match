@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
@@ -71,7 +71,7 @@ class SKUMatcher:
         for img_idx, (img_path, detections) in enumerate(zip(image_paths, all_detections)):
             t0 = time.perf_counter()
 
-            img_array = np.array(Image.open(image_paths[img_idx]).convert("RGB"))
+            img_array = np.array(ImageOps.exif_transpose(Image.open(image_paths[img_idx])).convert("RGB"))
 
             if not detections:
                 all_results[img_idx] = ([], 0.0)

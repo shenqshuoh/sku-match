@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import numpy as np
+from PIL import Image, ImageOps
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
@@ -8,6 +10,11 @@ from src.image_utils import process_detection_crops
 from src.masking import extract_binary_masks
 from src.types import Detection
 from src.utils import detect_device, free_gpu_memory
+
+
+def _load_image(path: Path) -> np.ndarray:
+    """Load image as RGB numpy array with EXIF orientation applied."""
+    return np.asarray(ImageOps.exif_transpose(Image.open(path)).convert("RGB"))
 
 
 def parse_detections(result) -> list[Detection]:
@@ -63,8 +70,9 @@ def detect(
     if not image_paths:
         raise FileNotFoundError("No images found in data/images/")
 
+    first_np = _load_image(image_paths[0])
     first_result = model.predict(
-        source=str(image_paths[0]),
+        source=first_np,
         device=device,
         conf=conf,
         imgsz=imgsz,
@@ -76,12 +84,13 @@ def detect(
     output_dir = Path(first_result[0].save_dir)
     crops_dir = output_dir / "crops"
 
-    _save_result(first_result[0], output_dir, crops_dir)
+    _save_result(first_result[0], output_dir, crops_dir, image_paths[0].stem)
     free_gpu_memory()
 
     for img_path in image_paths[1:]:
+        image_np = _load_image(img_path)
         results = model.predict(
-            source=str(img_path),
+            source=image_np,
             device=device,
             conf=conf,
             imgsz=imgsz,
@@ -90,14 +99,13 @@ def detect(
             save_crop=False,
             retina_masks=False,
         )
-        _save_result(results[0], output_dir, crops_dir)
+        _save_result(results[0], output_dir, crops_dir, img_path.stem)
         free_gpu_memory()
 
     print(f"Predictions saved to: {output_dir}")
 
 
-def _save_result(result, output_dir: Path, crops_dir: Path) -> None:
-    img_name = Path(result.path).stem
+def _save_result(result, output_dir: Path, crops_dir: Path, img_name: str) -> None:
     json_path = output_dir / f"{img_name}.json"
     preds = json.loads(result.to_json())
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
@@ -114,7 +114,7 @@ class ReferenceProcessor:
 
         Returns None if no detection is found.
         """
-        image = Image.open(image_path).convert("RGB")
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
         image_np = np.array(image)
 
         result = self._crop_detect(image_np)

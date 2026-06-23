@@ -4,7 +4,9 @@ set -euo pipefail
 # Reinitialise DB + Chroma, add SKUs from SKUDB/, then download processed crops.
 # SKUDB layout: $REF_DIR/<sku_id>/*.jpg  with  $REF_DIR/sku_names.csv  (sku_id,sku_name).
 # The folder name IS the sku_id; sku_name comes from sku_names.csv (fallback: folder name).
-# Usage: bash scripts/init_and_download.sh
+# Usage: bash scripts/init_and_download.sh [--test N | -t N | -T]
+#   -t, --test N   Process only the first N SKU folders (useful for quick test runs).
+#   -T             Shorthand for -t 20.
 
 API_URL="http://localhost:8000"
 API_KEY="4ELxhB_knxPmcYfOo4n4VtOmiXAx0WonzgI142VXrIA"
@@ -15,6 +17,35 @@ DB_PATH="/root/sku-match/sku_match.db"
 CHROMA_PATH="/root/sku-match/chroma_data"
 CDN_DOMAIN="https://vr.jihaihotpot.com/"
 ORIGIN_DOMAIN="http://iovip-z2.qiniuio.com"
+
+# --- Argument parsing ---
+TEST_LIMIT=0  # 0 = process all SKUs
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t|--test)
+            TEST_LIMIT="${2:?Error: -t/--test requires a number}"
+            shift 2
+            ;;
+        -T)
+            TEST_LIMIT=20
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: bash scripts/init_and_download.sh [-t N | --test N | -T]"
+            echo "  -t, --test N   Process only the first N SKU folders"
+            echo "  -T             Shorthand for -t 20"
+            exit 0
+            ;;
+        *)
+            echo "Error: unknown option '$1'" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$TEST_LIMIT" -gt 0 ]; then
+    echo "*** TEST MODE: processing first $TEST_LIMIT SKUs only ***"
+fi
 
 echo "=== Step 1: Stop API ==="
 systemctl stop sku-match || true
@@ -65,9 +96,16 @@ else
     echo "WARNING: $NAME_CSV not found; falling back to folder name as sku_name"
 fi
 
+sku_count=0
 for folder in $(ls -1 "$REF_DIR" | sort); do
     dirpath="$REF_DIR/$folder"
     [ -d "$dirpath" ] || continue
+
+    sku_count=$((sku_count + 1))
+    if [ "$TEST_LIMIT" -gt 0 ] && [ "$sku_count" -gt "$TEST_LIMIT" ]; then
+        echo "Test limit reached ($TEST_LIMIT SKUs). Stopping."
+        break
+    fi
 
     # Folder name is the sku_id; sku_name from the CSV (fallback: folder name).
     sku_id="$folder"
@@ -123,7 +161,7 @@ done
 echo ""
 echo "=== Step 5: Wait for embedding tasks ==="
 for i in $(seq 1 120); do
-    pending=$(curl -sf "$API_URL/api/v1/goods/sku/list?page=1&pageSize=50" \
+    pending=$(curl -sf "$API_URL/api/v1/goods/sku/list?page=1&size=9999" \
         -H "X-API-Key: $API_KEY" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -143,7 +181,7 @@ done
 
 echo ""
 echo "=== Final SKU status ==="
-curl -sf "$API_URL/api/v1/goods/sku/list?page=1&pageSize=50" \
+curl -sf "$API_URL/api/v1/goods/sku/list?page=1&size=9999" \
     -H "X-API-Key: $API_KEY" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)

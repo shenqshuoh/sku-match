@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from ultralytics import YOLOE
 
 from src.core import parse_detections
@@ -122,7 +122,7 @@ class RecognitionService:
         roi_rect: list[float] | None = None,
         device: str = "cpu",
     ) -> dict:
-        image = Image.open(image_path).convert("RGB")
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
         image_np = np.array(image)
 
         results = self.detector.predict(
