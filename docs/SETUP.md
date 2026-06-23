@@ -47,6 +47,8 @@ uv run sku-match-api
 
 # API: reinitialize DB + Chroma and bulk-add SKUs on the server
 bash scripts/init_and_download.sh
+# Test mode: process only first N SKUs (or -T for 20)
+bash scripts/init_and_download.sh -t 5
 
 # Run tests
 uv run python tests/test_detection.py

@@ -18,7 +18,7 @@ sku-match/
 ├── .env                      # Environment variables
 ├── src/
 │   ├── __init__.py           # Empty (no re-exports)
-│   ├── core.py               # CLI detection: detect(), parse_detections(), _save_result()
+│   ├── core.py               # CLI detection: detect(), parse_detections(), _save_result(), _load_image() (EXIF)
 │   ├── features.py           # Features dataclass, GeM pooling, fused CLS+GeM embedding
 │   ├── embedder.py           # Embedder: HuggingFace transformers + Optimum ONNX, fused features, auto device detect, FP16 on CUDA
 │   ├── indexer.py            # Chroma-backed SKUIndexer + score_matches(): build, add/delete/enable/search
@@ -55,7 +55,7 @@ sku-match/
 ├── scripts/
 │   ├── build_index.py        # [DEPRECATED] Legacy direct-Chroma builder (no crop/patch/DB); use init_and_download.sh
 │   ├── crop_reference.py     # Crop raw refs with YOLOE
-│   ├── init_and_download.sh  # Reinit DB + Chroma + patches, add SKUs from SKUDB/, download crops
+│   ├── init_and_download.sh  # Reinit DB + Chroma + patches, add SKUs from SKUDB/, download crops; --test/-t N/-T for limited runs; event-driven progress
 │   ├── sync_local.sh         # Sync from remote to local
 │   ├── sync_remote.sh        # Sync to remote server
 │   └── test_detection.py     # Detection test script
@@ -109,7 +109,7 @@ sku-match/
 | Image storage | api/services/image_storage.py | Download, upload to Qiniu, cleanup, old file deletion |
 | Shared utilities | src/utils.py | detect_device(), free_gpu_memory(), embedding_to_list(), configure_ultralytics_weights() |
 | Image utilities | src/image_utils.py | save_crop, process_detection_crops, draw_annotations, CJK font rendering via PIL |
-| Populate SKU index | scripts/init_and_download.sh | Server: reinit DB + Chroma, bulk-add SKUs (CLI auto-builds via main.py) |
+| Populate SKU index | scripts/init_and_download.sh | Server: reinit DB + Chroma, bulk-add SKUs. Supports --test/-t N/-T. Event-driven progress (CLI auto-builds via main.py) |
 | Crop raw refs | scripts/crop_reference.py | Pre-process raw photos with YOLOE detection |
 | API routes | api/routes/ | goods.py (SKU CRUD), recognition.py (detect/fix), logs.py, system.py |
 | ORM models | api/models.py | SKU, SKUMedia, RecognitionLog, TrainJob |
@@ -127,8 +127,9 @@ sku-match/
 | run_matching() | function | main.py:41 | SKU matching mode (default) |
 | get_next_match_dir() | function | main.py:17 | Auto-increment match output directory |
 | parse_detections() | function | src/core.py:13 | Shared YOLOE box→Detection parsing |
-| detect() | function | src/core.py:45 | Core YOLOE inference (CLI) — batch prediction with crop saving |
-| _save_result() | function | src/core.py:99 | Save detection JSON + masked crops |
+| detect() | function | src/core.py:45 | Core YOLOE inference (CLI) — batch prediction with EXIF-corrected numpy input, crop saving |
+| _save_result() | function | src/core.py:99 | Save detection JSON + masked crops (takes explicit img_name param) |
+| _load_image() | function | src/core.py:15 | Load PIL image with EXIF orientation applied |
 | Embedder | class | src/embedder.py:40 | DINOv2 embedder via HuggingFace transformers + Optimum ONNX, fused features |
 | EmbedderProtocol | protocol | src/embedder.py:28 | Interface for SKU image embedders |
 | DEFAULT_EMB_MODEL | constant | src/embedder.py:16 | Default local model path ("models/dinov2-base") |
@@ -263,7 +264,7 @@ sku-match/
 | `uv run sku-match --detection-only` | main.py | Detection only mode |
 | `uv run sku-match --det-model X --emb-model Y` | main.py | Custom models |
 | `uv run sku-match-api` | api/app.py | Start API server |
-| `bash scripts/init_and_download.sh` | init_and_download.sh | Server: reinit DB + Chroma, bulk-add SKUs from SKUDB/ |
+| `bash scripts/init_and_download.sh [-t N\|-T]` | init_and_download.sh | Server: reinit DB + Chroma, bulk-add SKUs (-t N limits to first N) |
 | `uv run python scripts/crop_reference.py -r data/references_raw/ -o data/references/` | crop_reference.py | Crop raw reference photos |
 | `uv run python tests/test_detection.py` | test_detection.py | Smoke tests |
 
@@ -301,6 +302,7 @@ sku-match/
 - **Index operations**: Chroma writes go through `ReferenceProcessor` (sync) for crop+embed pipeline; direct metadata CRUD on `SKUIndexer` (enable, delete, rename). Called via `asyncio.to_thread()` in routes. Temperature and top-2/top-1 scoring configurable via `SKUIndexer` constructor.
 - **Unicode JSON**: API uses `UnicodeJSONResponse` (ensure_ascii=False) as default response class
 - **uv required**: All commands use `uv run` — never `python` or `pip` directly. No manual venv activation. `uv sync` for install, `uv run` for execution.
+- **EXIF orientation**: All image entry points apply `ImageOps.exif_transpose()` at load to handle phone photos with rotation tags. Applied in: core.py `_load_image()`, matcher.py, embedder.py `embed_path()`, reference_processor.py `crop_reference()`, recognition.py. `model.predict(numpy_array)` does NOT apply EXIF (only `predict([path_strings])` does).
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -350,6 +352,9 @@ uv run sku-match
 # API/server: reinitialize DB + Chroma and bulk-add SKUs from SKUDB/
 bash scripts/init_and_download.sh
 
+# Test mode: process only first N SKUs (or -T for 20)
+bash scripts/init_and_download.sh -t 5
+
 # Crop raw reference photos
 uv run python scripts/crop_reference.py -r data/references_raw/ -o data/references/
 
@@ -390,4 +395,4 @@ apt-get install fonts-noto-cjk
 - **Shared pipeline**: `parse_detections()` (src/core.py) and `score_matches()` (src/indexer.py) used by both CLI matcher and API recognition service.
 - **process_single_media()**: Shared download→embed→upload→cleanup helper in api/tasks.py, used by both start_embed_task and manage_media route.
 - **Masking module**: `src/masking.py` — configurable background color (default ImageNet mean RGB). Used by CLI detection and reference processor.
-- **Init script**: `scripts/init_and_download.sh` wipes DB + Chroma + `data/patches/` to prevent stale doc_id mismatches after re-indexing. Rebuilds via API `/goods/sku/new` endpoints.
+- **Init script**: `scripts/init_and_download.sh` wipes DB + Chroma + `data/patches/` to prevent stale doc_id mismatches after re-indexing. Rebuilds via API `/goods/sku/new` endpoints. Supports `--test/-t N/-T` flags for limited test runs. Embedding progress is event-driven (prints only on completion/failure) with a failure-focused summary table.
