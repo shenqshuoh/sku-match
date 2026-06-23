@@ -51,10 +51,8 @@ See [docs/API_GUIDE.md](docs/API_GUIDE.md) for API usage and endpoint reference.
 ```bash
 # 1. Prepare reference images in data/references/{sku_id}/*.jpg
 
-# 2. Build the reference index (one-time setup)
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-small
-
-# 3. Run detection with SKU matching
+# 2. Run detection with SKU matching
+#    The Chroma index auto-builds on first run (crop + embed) when chroma_data/ is empty.
 python main.py
 
 # With custom options
@@ -78,23 +76,29 @@ python main.py --detection-only --conf 0.5
 # 2. Auto-crop using YOLOE detection
 python scripts/crop_reference.py -r data/references_raw/ -o data/references/
 
-# 3. Build index and run matching
-python scripts/build_index.py -r data/references/ -o chroma_data/
+# 3. Run matching (index auto-builds from data/references/ on first run)
 python main.py
 ```
 
-### Build Index with Different Embedding Models
+### Choosing an Embedding Model
+
+The DINOv2 embedding model is selected at run time and determines the dimensionality of the
+(auto-built) index. **Switching models requires rebuilding the index** — delete `chroma_data/`
+so it auto-rebuilds on the next run.
 
 ```bash
 # Small model (faster): 384-dim embeddings
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-small
+python main.py --emb-model facebook/dinov2-small
 
 # Base model (balanced): 768-dim embeddings
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-base
+python main.py --emb-model facebook/dinov2-base
 
 # Large model (higher accuracy): 1024-dim embeddings
-python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-large
+python main.py --emb-model facebook/dinov2-large
 ```
+
+For API deployments, set `EMB_MODEL` and populate the index with `scripts/init_and_download.sh`
+(see [docs/SETUP.md](docs/SETUP.md)).
 
 ### CLI Options
 
@@ -116,14 +120,8 @@ python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/di
 | `--swap` | - | Swap to detection-only model |
 | `--onnx` | - | Use ONNX backend for DINOv2 |
 
-**build_index.py:**
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `-r, --reference-dir` | data/references/ | Reference images directory |
-| `-o, --output-dir` | chroma_data/ | Output directory for Chroma index |
-| `-m, --model` | facebook/dinov2-base | Embedding model variant |
-| `--device` | auto | Device for inference |
+> **Deprecated:** `scripts/build_index.py` is deprecated. The CLI auto-builds the index from
+> `data/references/` on first run; for API deployments use `scripts/init_and_download.sh`.
 
 **crop_reference.py:**
 

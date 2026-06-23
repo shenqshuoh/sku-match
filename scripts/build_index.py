@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
+"""Build a Chroma SKU index directly from reference images. [DEPRECATED].
+
+Deprecated: superseded by the API-driven pipeline. Use ``scripts/init_and_download.sh``
+(which posts to ``/api/v1/goods/sku/new``) or
+:class:`src.reference_processor.ReferenceProcessor` instead.
+
+This legacy builder is incomplete versus the current pipeline: it embeds raw, uncropped
+images (no YOLOE crop, no background masking), stores no patch tokens (so patch
+re-ranking is unavailable), writes no ``feature_type`` metadata, and bypasses the
+database entirely (no SKU/SKUMedia rows, no Qiniu media URLs). Indexes it produces are
+therefore inconsistent with runtime queries (which come from cropped/masked detections)
+and invisible to the API.
+"""
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -74,6 +88,13 @@ def build_reference_index(
 
 
 def main():
+    warnings.warn(
+        "scripts/build_index.py is deprecated; use scripts/init_and_download.sh or "
+        "ReferenceProcessor instead. Produced indexes lack crops/masking, patch tokens, "
+        "feature_type metadata, and DB rows.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     parser = argparse.ArgumentParser(description="Build SKU reference index with DINOv2 embeddings")
     parser.add_argument(
         "-r",

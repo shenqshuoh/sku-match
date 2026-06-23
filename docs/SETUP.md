@@ -36,7 +36,7 @@ uv sync --extra cu126
 All commands use `uv run` — no venv activation required:
 
 ```bash
-# CLI: SKU matching
+# CLI: SKU matching (index auto-builds from data/references/ on first run)
 uv run sku-match
 
 # CLI: Detection only
@@ -45,8 +45,8 @@ uv run sku-match --detection-only
 # API server
 uv run sku-match-api
 
-# Build Chroma index
-uv run python scripts/build_index.py -r data/references/ -o chroma_data/ -m facebook/dinov2-base
+# API: reinitialize DB + Chroma and bulk-add SKUs on the server
+bash scripts/init_and_download.sh
 
 # Run tests
 uv run python tests/test_detection.py
@@ -169,18 +169,20 @@ curl http://localhost:8000/health
 # {"status":"ok"}
 ```
 
-## 8. Building the Chroma Index (Optional)
+## 8. Building the Chroma Index
 
-If you have existing reference images in `data/references/{sku_id}/`:
+You normally don't build the index manually:
 
-```bash
-uv run python scripts/build_index.py \
-  -r data/references/ \
-  -o chroma_data/ \
-  -m facebook/dinov2-small
-```
+- **CLI** (`uv run sku-match`): the index auto-builds from `data/references/{sku_id}/` on first
+  run (crop → embed → index) when `chroma_data/` is empty. The embedding model is set with
+  `--emb-model`.
+- **API**: SKUs are indexed automatically when created via `/api/v1/goods/sku/new`. On a server,
+  use `scripts/init_and_download.sh` to reinitialize the DB + Chroma and bulk-add SKUs from a
+  reference directory.
 
-This is only needed for manual index building. The API builds the index automatically when SKUs are created via `/api/v1/goods/sku/new`.
+> `scripts/build_index.py` is **deprecated** — it embeds raw (uncropped) images, stores no patch
+> tokens or `feature_type` metadata, and bypasses the database. Use the CLI auto-build or
+> `init_and_download.sh` instead.
 
 ## 9. Troubleshooting
 

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reinitialise DB + Chroma, add SKUs from reference/, then download processed crops.
+# Reinitialise DB + Chroma, add SKUs from SKUDB/, then download processed crops.
+# SKUDB layout: $REF_DIR/<sku_id>/*.jpg  with  $REF_DIR/sku_names.csv  (sku_id,sku_name).
+# The folder name IS the sku_id; sku_name comes from sku_names.csv (fallback: folder name).
 # Usage: bash scripts/init_and_download.sh
 
 API_URL="http://localhost:8000"
 API_KEY="4ELxhB_knxPmcYfOo4n4VtOmiXAx0WonzgI142VXrIA"
-REF_DIR="/opt/drink_imgs/reference"
-OUT_DIR="/opt/drink_imgs/reference_processed"
+REF_DIR="/opt/SKUDB"
+NAME_CSV="$REF_DIR/sku_names.csv"   # sku_id -> sku_name mapping (UTF-8 CSV, optional)
+OUT_DIR="/opt/SKUDB_processed"
 DB_PATH="/root/sku-match/sku_match.db"
 CHROMA_PATH="/root/sku-match/chroma_data"
 CDN_DOMAIN="https://vr.jihaihotpot.com/"
@@ -40,20 +43,35 @@ if ! curl -sf "$API_URL/health" > /dev/null; then
     exit 1
 fi
 
-echo "=== Step 4: Add SKUs from reference folders ==="
-sku_counter=1
+echo "=== Step 4: Add SKUs from SKUDB folders ==="
+
+# Load sku_id -> sku_name mapping from CSV (utf-8-sig strips BOM; csv module handles
+# any commas in names). name_map stays in scope for the step 6 prefix matching.
+declare -A name_map=()
+if [ -f "$NAME_CSV" ]; then
+    while IFS=$'\t' read -r sid sname; do
+        [ -n "$sid" ] && name_map["$sid"]="$sname"
+    done < <(python3 -c "
+import csv, sys
+with open('$NAME_CSV', encoding='utf-8-sig', newline='') as f:
+    reader = csv.reader(f)
+    next(reader, None)  # skip header
+    for row in reader:
+        if len(row) >= 2:
+            sys.stdout.write(row[0] + '\t' + row[1] + '\n')
+")
+    echo "Loaded ${#name_map[@]} sku names from $NAME_CSV"
+else
+    echo "WARNING: $NAME_CSV not found; falling back to folder name as sku_name"
+fi
+
 for folder in $(ls -1 "$REF_DIR" | sort); do
     dirpath="$REF_DIR/$folder"
     [ -d "$dirpath" ] || continue
 
-    name_file="$dirpath/name.txt"
-    if [ -f "$name_file" ]; then
-        sku_name=$(cat "$name_file" | tr -d '\n')
-    else
-        sku_name="$folder"
-    fi
-
-    sku_id=$(printf "t%02d" $sku_counter)
+    # Folder name is the sku_id; sku_name from the CSV (fallback: folder name).
+    sku_id="$folder"
+    sku_name="${name_map[$sku_id]:-$folder}"
     train_job_id="job_${sku_id}_$(date +%s)"
 
     # Read ignore list
@@ -84,8 +102,7 @@ for folder in $(ls -1 "$REF_DIR" | sort); do
     unset ignore_set
 
     if [ "$files_json" = "[]" ]; then
-        echo "SKIP $sku_id ($folder): no images"
-        sku_counter=$((sku_counter + 1))
+        echo "SKIP $sku_id ($sku_name): no images"
         continue
     fi
 
@@ -98,11 +115,9 @@ for folder in $(ls -1 "$REF_DIR" | sort); do
         -d "{\"skuId\":\"$sku_id\",\"skuName\":\"$sku_name\",\"files\":$files_json,\"trainJobId\":\"$train_job_id\"}" \
     ) || {
         echo "FAIL $sku_id: $response"
-        sku_counter=$((sku_counter + 1))
         continue
     }
     echo "  -> $response"
-    sku_counter=$((sku_counter + 1))
 done
 
 echo ""
@@ -142,38 +157,33 @@ echo "=== Step 6: Download processed crops from Qiniu ==="
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
-# Build sku_id -> folder name mapping from media URLs
-mapping=$(curl -sf "$API_URL/api/v1/goods/sku/list?page=1&pageSize=50" \
-    -H "X-API-Key: $API_KEY" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for s in data['data']['list']:
-    sid = s['skuId']
-    for m in s['medias']:
-        url = m['mediaUrl']
-        parts = url.split('/reference/')[-1].split('/')
-        folder = parts[0] if parts else sid
-        print(f'{sid}\t{folder}')
-        break
-")
-
+# Processed-crop CDN URLs exist only in the API log ("Uploaded crop_... -> <cdn>"),
+# so we grep it. sku_id now contains an underscore (e.g. 100014_nfsqkqs), so positional
+# awk splitting is ambiguous; instead match the crop filename prefix against the known
+# sku_ids loaded into name_map above. Since sku_id == folder, output goes to $OUT_DIR/$sku_id.
 total=0
 ok=0
 fail=0
 while IFS= read -r line; do
-    cdn_url=$(echo "$line" | grep -o 'https://[^ ]*')
-    # Extract sku_id from filename: crop_{sku_id}_{media_id}_{rand}.jpg
-    filename=$(basename "$cdn_url")
-    sku_id=$(echo "$filename" | awk -F'_' '{print $2}')
+    # Log line (possibly prefixed by timestamp/level): "... Uploaded crop_<sku_id>_<media_id>_<rand>.jpg -> https://<cdn>/..."
+    cropname="${line#*Uploaded }"
+    cropname="${cropname%% -> *}"
+    cdn_url="${line#* -> }"
 
-    folder=$(echo "$mapping" | awk -v sid="$sku_id" '$1 == sid {print $2; exit}')
-    folder=${folder:-$sku_id}
+    sku_id=""
+    for id in "${!name_map[@]}"; do
+        if [[ "$cropname" == crop_${id}_* ]]; then
+            sku_id="$id"
+            break
+        fi
+    done
+    sku_id="${sku_id:-unknown}"
 
-    mkdir -p "$OUT_DIR/$folder"
+    mkdir -p "$OUT_DIR/$sku_id"
 
     key=${cdn_url#$CDN_DOMAIN}
     origin_url="$ORIGIN_DOMAIN/$key"
-    outfile="$OUT_DIR/$folder/$(basename "$cdn_url")"
+    outfile="$OUT_DIR/$sku_id/$cropname"
 
     total=$((total + 1))
     if curl -sf -o "$outfile" -H "Host: vr.jihaihotpot.com" "$origin_url" 2>/dev/null; then
