@@ -19,15 +19,19 @@ class Settings(BaseSettings):
     CONCENTRATION_TOPK: int = 10
     USE_ONNX: bool = False
 
+    # Scoring
+    TEMPERATURE: float = 0.05   # Softmax temperature (lower = more decisive distribution)
+    USE_TOP2_SUM: bool = False  # True = sum of top-2 similarities; False = top-1 only
+
     # Feature extraction
     USE_FUSED_FEATURES: bool = True
-    FUSE_ALPHA: float = 0.5
+    FUSE_ALPHA: float = 1.0
     GEM_P: float = 3.0
 
     # Patch re-ranking
     USE_RERANKING: bool = True
     RERANK_TOP_K: int = 50
-    RERANK_BLEND_BETA: float = 0.7
+    RERANK_BLEND_BETA: float = 0.5
 
     # Patch storage
     PATCH_DIR: str = "data/patches"

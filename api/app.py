@@ -89,7 +89,12 @@ async def lifespan(app: FastAPI):
         configuration={"hnsw": {"space": "cosine"}},
     )
 
-    indexer = SKUIndexer(collection=collection)
+    indexer = SKUIndexer(
+        collection=collection,
+        temperature=settings.TEMPERATURE,
+        use_top2_sum=settings.USE_TOP2_SUM,
+    )
+    logger.info("Indexer config: temperature=%s, top2_sum=%s", settings.TEMPERATURE, settings.USE_TOP2_SUM)
 
     # Validate feature type compatibility
     indexer.validate_feature_type(feature_type)

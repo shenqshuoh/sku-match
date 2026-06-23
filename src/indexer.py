@@ -130,12 +130,14 @@ class SKUIndexer:
         collection: chromadb.Collection | None = None,
         persist_dir: str | Path | None = None,
         search_multiplier: float = 0.5,
-        temperature: float = 0.5,
+        temperature: float = 0.2,
+        use_top2_sum: bool = True,
     ) -> None:
         self._collection = collection
         self._persist_dir = Path(persist_dir) if persist_dir else None
         self._search_multiplier = search_multiplier
         self._temperature = temperature
+        self._use_top2_sum = use_top2_sum
         self._enabled_sku_count: int = 0
         self._sku_name_cache: dict[str, str] = {}
         self._cache_valid = False
@@ -320,8 +322,9 @@ class SKUIndexer:
 
         Algorithm: for each query, fetch top-N results from Chroma (cosine distance),
         convert to similarity (2.0 - distance), group by sku_id, sum the top-2
-        similarities per SKU, then apply softmax to produce a probability distribution
-        over all enabled SKUs. Unranked SKUs receive a small epsilon score.
+        similarities per SKU (or take top-1 if ``use_top2_sum=False``), then apply
+        softmax to produce a probability distribution over all enabled SKUs.
+        Unranked SKUs receive a small epsilon score.
 
         Args:
             query_embeddings: Array of query embeddings (one per detection crop).
@@ -389,12 +392,15 @@ class SKUIndexer:
                 else:
                     rank_info[sku_id] = []
 
-            # Compute raw scores: top-2 sum for ranked SKUs, epsilon for unranked
+            # Compute raw scores: top-2 sum (or top-1) for ranked SKUs, epsilon for unranked
             raw_scores: dict[str, float] = {}
             for sku_id in all_enabled_skus:
                 if sku_id in sku_scores:
                     top2 = sorted(sku_scores[sku_id], reverse=True)[:2]
-                    raw_scores[sku_id] = top2[0] if len(top2) == 1 else sum(top2)
+                    if self._use_top2_sum and len(top2) >= 2:
+                        raw_scores[sku_id] = top2[0] + top2[1]
+                    else:
+                        raw_scores[sku_id] = top2[0]
                 else:
                     raw_scores[sku_id] = EPSILON
 
