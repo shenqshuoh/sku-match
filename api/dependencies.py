@@ -9,6 +9,7 @@ from fastapi import Request
 
 from api.services.image_storage import ImageStorage
 from api.services.recognition import RecognitionService
+from src.color_store import ColorStore
 from src.indexer import SKUIndexer
 from src.patch_store import PatchStore
 from src.reference_processor import ReferenceProcessor
@@ -36,6 +37,10 @@ def get_inference_executor(request: Request) -> concurrent.futures.ThreadPoolExe
 
 def get_patch_store(request: Request) -> PatchStore | None:
     return request.app.state.patch_store
+
+
+def get_color_store(request: Request) -> ColorStore | None:
+    return request.app.state.color_store
 
 
 def get_device(request: Request) -> str:

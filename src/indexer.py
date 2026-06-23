@@ -281,6 +281,35 @@ class SKUIndexer:
                 f"Rebuild the index or change the feature mode setting."
             )
 
+    def validate_color_dim(self, expected_dim: int) -> None:
+        """Validate that indexed vectors carry color descriptors of the expected dimension.
+
+        Checks the ``color_dim`` per-vector metadata against ``expected_dim``. Raises
+        RuntimeError on mismatch, or when the metadata is absent (the index was built
+        without color descriptors, so the color re-ranker cannot score them). Empty
+        collections pass validation.
+
+        Args:
+            expected_dim: Expected descriptor length, i.e. ``color_descriptor_dim(n_bins)``.
+        """
+        sample = self.collection.get(limit=1, include=["metadatas"])
+        if not sample["ids"]:
+            return  # Empty collection — OK
+
+        actual = sample["metadatas"][0].get("color_dim")
+        if actual is None:
+            raise RuntimeError(
+                "ChromaDB index has no color_dim metadata — references were indexed "
+                "without color descriptors. Wipe data/colors/ and reprocess references "
+                "with USE_COLOR_RERANK enabled."
+            )
+        if actual != expected_dim:
+            raise RuntimeError(
+                f"ChromaDB color descriptors are {actual}-dim but config expects "
+                f"{expected_dim}-dim (COLOR_BINS mismatch). Rebuild the color index or "
+                f"change COLOR_BINS."
+            )
+
     def validate_emb_model(self, expected_model: str) -> None:
         """Validate that the index was built with the expected embedding model.
 

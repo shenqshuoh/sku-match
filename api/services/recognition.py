@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image, ImageOps
 from ultralytics import YOLOE
 
+from src.color import extract_color_descriptor
 from src.core import parse_detections
 from src.embedder import Embedder
 from src.image_utils import draw_annotations
@@ -17,6 +18,7 @@ from src.reranker import rerank
 
 if TYPE_CHECKING:
     from api.services.image_storage import ImageStorage
+    from src.color_store import ColorStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,10 @@ class RecognitionService:
         use_reranking: bool = True,
         rerank_top_k: int = 50,
         rerank_blend_beta: float = 0.3,
+        color_store: "ColorStore | None" = None,
+        use_color: bool = False,
+        color_gamma: float = 0.0,
+        color_bins: int = 16,
     ):
         self.detector = detector
         self.embedder = embedder
@@ -50,12 +56,24 @@ class RecognitionService:
         self.use_reranking = use_reranking
         self.rerank_top_k = rerank_top_k
         self.rerank_blend_beta = rerank_blend_beta
+        self.color_store = color_store
+        self.use_color = use_color
+        self.color_gamma = color_gamma
+        self.color_bins = color_bins
+
+        # Fail fast at startup: rerank() enforces blend_beta + color_gamma <= 1.0
+        if self.use_color and (self.rerank_blend_beta + self.color_gamma > 1.0 + 1e-9):
+            raise ValueError(
+                f"rerank_blend_beta + color_gamma must be <= 1.0 "
+                f"(got beta={self.rerank_blend_beta}, gamma={self.color_gamma})"
+            )
 
     def _score_with_reranking(
         self,
         detections: list,
         search_results: list[tuple],
         features_list: list,
+        query_color_descriptors: list | None = None,
     ) -> list:
         """Score detections using patch re-ranking with blended scoring.
 
@@ -67,8 +85,8 @@ class RecognitionService:
         from src.types import SKUMatch
 
         all_matches = []
-        for det, (coarse_dist, rank_info, top_vectors), features in zip(
-            detections, search_results, features_list
+        for i, (det, (coarse_dist, rank_info, top_vectors), features) in enumerate(
+            zip(detections, search_results, features_list)
         ):
             # Run re-ranking
             rerank_results = rerank(
@@ -76,6 +94,11 @@ class RecognitionService:
                 patch_store=self.patch_store,
                 top_vectors=top_vectors,
                 blend_beta=self.rerank_blend_beta,
+                color_store=self.color_store if self.use_color else None,
+                query_color_descriptor=(
+                    query_color_descriptors[i] if query_color_descriptors else None
+                ),
+                color_gamma=self.color_gamma,
             )
 
             if not rerank_results:
@@ -163,6 +186,13 @@ class RecognitionService:
             crop = Image.fromarray(image_np[y1:y2, x1:x2])
             crops.append(crop)
 
+        # Extract query color descriptors when color re-ranking is active
+        query_color_descriptors: list | None = None
+        if self.use_color and self.color_store is not None:
+            query_color_descriptors = [
+                extract_color_descriptor(np.array(c), n_bins=self.color_bins) for c in crops
+            ]
+
         # Extract features (CLS + patches in single forward pass)
         features_list = self.embedder.extract_features_batch(crops)
         embeddings = np.stack([self.embedder.features_to_embedding(f) for f in features_list])
@@ -175,6 +205,7 @@ class RecognitionService:
             # Stage 2: Patch re-ranking with blended scoring
             matches = self._score_with_reranking(
                 detections, search_results, features_list,
+                query_color_descriptors=query_color_descriptors,
             )
         else:
             # Standard scoring pipeline

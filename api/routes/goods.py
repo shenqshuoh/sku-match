@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.database import get_db
-from api.dependencies import get_image_storage, get_indexer, get_inference_executor, get_processor
+from api.dependencies import (
+    get_color_store,
+    get_image_storage,
+    get_indexer,
+    get_inference_executor,
+    get_patch_store,
+    get_processor,
+)
 from api.models import SKU, SKUMedia, TrainJob
 from api.schemas import (
     ApiResponse,
@@ -25,7 +32,9 @@ from api.schemas import (
 )
 from api.services.image_storage import ImageStorage
 from api.tasks import process_single_media, start_embed_task
+from src.color_store import ColorStore
 from src.indexer import SKUIndexer
+from src.patch_store import PatchStore
 from src.reference_processor import ReferenceProcessor
 
 logger = logging.getLogger(__name__)
@@ -120,17 +129,23 @@ async def update_sku(
 async def delete_sku(
     request: SKUDeleteRequest,
     indexer: SKUIndexer = Depends(get_indexer),
+    patch_store: PatchStore | None = Depends(get_patch_store),
+    color_store: ColorStore | None = Depends(get_color_store),
     db: AsyncSession = Depends(get_db),
 ):
-    # 1. Delete SKU row (cascade deletes media)
+    # 1. Check SKU exists
     sku, err = await _get_sku_or_error(db, request.skuId)
     if err:
         return err
     await db.delete(sku)  # ORM delete — triggers cascade="all, delete-orphan"
     await db.commit()
 
-    # 2. Remove references from Chroma
+    # 2. Remove references from Chroma + stored artifacts (patches, color descriptors)
     await asyncio.to_thread(indexer.delete_sku, request.skuId)
+    if patch_store is not None:
+        await asyncio.to_thread(patch_store.delete_sku, request.skuId)
+    if color_store is not None:
+        await asyncio.to_thread(color_store.delete_sku, request.skuId)
 
     return ApiResponse(data={})
 
@@ -214,6 +229,8 @@ async def manage_media(
     indexer: SKUIndexer = Depends(get_indexer),
     image_storage: ImageStorage = Depends(get_image_storage),
     inference_executor: ThreadPoolExecutor = Depends(get_inference_executor),
+    patch_store: PatchStore | None = Depends(get_patch_store),
+    color_store: ColorStore | None = Depends(get_color_store),
     db: AsyncSession = Depends(get_db),
 ):
     if request.action == "add":
@@ -256,10 +273,12 @@ async def manage_media(
                 continue
             await db.execute(delete(SKUMedia).where(SKUMedia.media_id == item.mediaId))
             await db.commit()
-            await asyncio.to_thread(
-                indexer.delete_media,
-                request.skuId, item.mediaId,
-            )
+            doc_id = f"{request.skuId}__{item.mediaId}"
+            await asyncio.to_thread(indexer.delete_media, request.skuId, item.mediaId)
+            if patch_store is not None:
+                await asyncio.to_thread(patch_store.delete, doc_id)
+            if color_store is not None:
+                await asyncio.to_thread(color_store.delete, doc_id)
         return ApiResponse(data={})
     else:
         return ApiResponse(code=0, msg="Unsupported action")

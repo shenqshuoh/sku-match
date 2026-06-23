@@ -31,10 +31,16 @@ class Settings(BaseSettings):
     # Patch re-ranking
     USE_RERANKING: bool = True
     RERANK_TOP_K: int = 50
-    RERANK_BLEND_BETA: float = 0.5
+    RERANK_BLEND_BETA: float = 0.8
 
     # Patch storage
     PATCH_DIR: str = "data/patches"
+
+    # Color histogram re-ranking
+    USE_COLOR_RERANK: bool = True   # Off until validated; strictly additive when enabled
+    COLOR_GAMMA: float = 0.0        # Color weight: final = β·patch + γ·color + (1−β−γ)·coarse
+    COLOR_BINS: int = 16            # HSV histogram bins per channel (49-dim descriptor at 16)
+    COLOR_DIR: str = "data/colors"
 
     HOST: str = "0.0.0.0"
     PORT: int = 8000

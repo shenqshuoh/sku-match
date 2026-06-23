@@ -18,6 +18,8 @@ from api.routes import goods, logs, recognition, system
 from api.services.image_storage import ImageStorage
 from api.services.recognition import RecognitionService
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
+from src.color import color_descriptor_dim
+from src.color_store import ColorStore
 from src.embedder import Embedder
 from src.indexer import SKUIndexer
 from src.patch_store import PatchStore
@@ -109,6 +111,21 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Patch re-ranking disabled")
 
+    # Initialize color store for color re-ranking (off by default)
+    color_store: ColorStore | None = None
+    if settings.USE_COLOR_RERANK:
+        color_store = ColorStore(color_dir=settings.COLOR_DIR)
+        logger.info(
+            "Color re-ranking enabled: color_dir=%s, gamma=%s, bins=%d",
+            settings.COLOR_DIR, settings.COLOR_GAMMA, settings.COLOR_BINS,
+        )
+        # Fail fast: indexed vectors must carry color descriptors of the configured
+        # dimension. Catches COLOR_BINS drift / index built without color before any
+        # request reaches the re-ranker.
+        indexer.validate_color_dim(color_descriptor_dim(settings.COLOR_BINS))
+    else:
+        logger.info("Color re-ranking disabled")
+
     image_storage = ImageStorage(
         results_dir=settings.RESULTS_DIR,
         download_timeout=settings.DOWNLOAD_TIMEOUT,
@@ -131,6 +148,8 @@ async def lifespan(app: FastAPI):
         indexer=indexer,
         device=device,
         patch_store=patch_store,
+        color_store=color_store,
+        color_bins=settings.COLOR_BINS,
         feature_type=feature_type,
         crop_model_path=crop_model_path,
     )
@@ -147,6 +166,10 @@ async def lifespan(app: FastAPI):
         use_reranking=settings.USE_RERANKING,
         rerank_top_k=settings.RERANK_TOP_K,
         rerank_blend_beta=settings.RERANK_BLEND_BETA,
+        color_store=color_store,
+        use_color=settings.USE_COLOR_RERANK,
+        color_gamma=settings.COLOR_GAMMA,
+        color_bins=settings.COLOR_BINS,
     )
 
     # Dedicated GPU inference executor — prevents concurrent GPU access under load
@@ -164,6 +187,7 @@ async def lifespan(app: FastAPI):
     app.state.processor = processor
     app.state.recognition_service = recognition_service
     app.state.patch_store = patch_store
+    app.state.color_store = color_store
     app.state.feature_type = feature_type
 
     logger.info("Startup complete")

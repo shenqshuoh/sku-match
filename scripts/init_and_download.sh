@@ -51,10 +51,11 @@ echo "=== Step 1: Stop API ==="
 systemctl stop sku-match || true
 sleep 2
 
-echo "=== Step 2: Wipe DB + Chroma + Patches + Log ==="
+echo "=== Step 2: Wipe DB + Chroma + Patches + Colors + Log ==="
 rm -f "$DB_PATH"
 rm -rf "$CHROMA_PATH"
 rm -rf /root/sku-match/data/patches
+rm -rf /root/sku-match/data/colors
 > /tmp/sku-match-api.log
 
 echo "=== Step 3: Start API ==="

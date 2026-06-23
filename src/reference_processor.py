@@ -4,17 +4,22 @@ import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image, ImageOps
 from ultralytics import YOLOE
 
 from src.classes.beverage_cls import BEVERAGE_CONTAINER_CLASSES
+from src.color import color_descriptor_dim, extract_color_descriptor
 from src.embedder import Embedder
 from src.indexer import SKUIndexer
 from src.masking import extract_binary_masks, mask_background
 from src.patch_store import PatchStore
 from src.utils import embedding_to_list, free_gpu_memory
+
+if TYPE_CHECKING:
+    from src.color_store import ColorStore
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,8 @@ class ReferenceProcessor:
         imgsz: int = 640,
         use_mask: bool = False,
         patch_store: PatchStore | None = None,
+        color_store: "ColorStore | None" = None,
+        color_bins: int = 16,
         feature_type: str | None = None,
         crop_model_path: str | None = None,
     ):
@@ -73,6 +80,8 @@ class ReferenceProcessor:
         self.imgsz = imgsz
         self.use_mask = use_mask
         self.patch_store = patch_store
+        self.color_store = color_store
+        self.color_bins = color_bins
         self.feature_type = feature_type
         self.crop_model_path = crop_model_path
 
@@ -178,7 +187,17 @@ class ReferenceProcessor:
             doc_id = f"{sku_id}__{media_id}"
             self.patch_store.save(doc_id, features.patches)
 
-        self.indexer.add_reference(sku_id, sku_name, media_id, embedding, metadata, feature_type=self.feature_type)
+        # Save color descriptor for color re-ranking if color store is configured.
+        # Record the descriptor dimension in Chroma metadata so a later COLOR_BINS
+        # change fails fast at startup (SKUIndexer.validate_color_dim) instead of
+        # crashing mid-rerank with a shape mismatch.
+        index_meta = dict(metadata) if metadata else {}
+        if self.color_store is not None:
+            doc_id = f"{sku_id}__{media_id}"
+            self.color_store.save(doc_id, extract_color_descriptor(np.array(crop), n_bins=self.color_bins))
+            index_meta["color_dim"] = color_descriptor_dim(self.color_bins)
+
+        self.indexer.add_reference(sku_id, sku_name, media_id, embedding, index_meta, feature_type=self.feature_type)
         logger.info("Cropped, embedded and indexed reference %s/%s", sku_id, media_id)
 
         # Save masked crop to temp file for Qiniu upload
@@ -255,6 +274,14 @@ class ReferenceProcessor:
                     doc_id = batch_meta[j][2]  # (sku_id, sku_name, doc_id)
                     self.patch_store.save(doc_id, f.patches)
 
+            # Save color descriptors if color store is configured
+            if self.color_store is not None:
+                for j in range(len(features_list)):
+                    doc_id = batch_meta[j][2]
+                    self.color_store.save(
+                        doc_id, extract_color_descriptor(np.array(crops[j]), n_bins=self.color_bins)
+                    )
+
             ids = [m[2] for m in batch_meta]
             emb_list = [embedding_to_list(e) for e in embeddings]
             metadatas = [
@@ -264,6 +291,10 @@ class ReferenceProcessor:
             if self.feature_type is not None:
                 for meta in metadatas:
                     meta["feature_type"] = self.feature_type
+            if self.color_store is not None:
+                color_dim = color_descriptor_dim(self.color_bins)
+                for meta in metadatas:
+                    meta["color_dim"] = color_dim
 
             self.indexer.collection.add(ids=ids, embeddings=emb_list, metadatas=metadatas)
             total_added += len(crops)

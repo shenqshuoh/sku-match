@@ -26,6 +26,8 @@ sku-match/
 │   ├── types.py              # Dataclasses: Detection, SKUReference, SKUMatch
 │   ├── utils.py              # Shared: detect_device(), free_gpu_memory(), embedding_to_list(), configure_ultralytics_weights()
 │   ├── masking.py            # Mask extraction + configurable background masking (ImageNet mean default)
+│   ├── color.py              # extract_color_descriptor: HSV histogram (49-dim) for color re-ranking
+│   ├── color_store.py        # ColorStore: per-image color descriptor .npy persistence (mirrors PatchStore)
 │   ├── patch_store.py        # PatchStore: per-image patch token .npy persistence for re-ranking
 │   ├── reranker.py           # Patch-to-patch re-ranking: max-of-mean similarity + blended scoring
 │   ├── reference_processor.py # ReferenceProcessor: crop→embed→index pipeline, on-demand CROP_MODEL, patch saving
@@ -36,7 +38,7 @@ sku-match/
 │   ├── __init__.py
 │   ├── app.py                # FastAPI + lifespan: loads detector, embedder, Chroma, services
 │   ├── auth.py               # API key auth + per-IP rate limiting (disabled by default)
-│   ├── config.py             # pydantic-settings: DET_MODEL, CROP_MODEL, EMB_MODEL, DEVICE, MATCH_CONF, TEMPERATURE, USE_TOP2_SUM, RERANK_BLEND_BETA, etc.
+│   ├── config.py             # pydantic-settings: DET_MODEL, CROP_MODEL, EMB_MODEL, DEVICE, MATCH_CONF, TEMPERATURE, USE_TOP2_SUM, RERANK_BLEND_BETA, USE_COLOR_RERANK, COLOR_GAMMA, etc.
 │   ├── database.py           # SQLAlchemy async engine + get_db + init_db
 │   ├── models.py             # ORM: SKU, SKUMedia, RecognitionLog, TrainJob
 │   ├── schemas.py            # Pydantic request/response models
@@ -44,7 +46,7 @@ sku-match/
 │   ├── dependencies.py       # FastAPI DI providers replacing app.state access
 │   ├── routes/
 │   │   ├── __init__.py
-│   │   ├── goods.py          # SKU CRUD (new/update/delete/enable/list/media)
+│   │   ├── goods.py          # SKU CRUD (new/update/delete/enable/list/media); delete cascades Chroma + patch/color .npy cleanup
 │   │   ├── recognition.py    # POST /detect, POST /fix
 │   │   ├── logs.py           # GET /recognition/get
 │   │   └── system.py         # GET /train-status/get
@@ -55,7 +57,7 @@ sku-match/
 ├── scripts/
 │   ├── build_index.py        # [DEPRECATED] Legacy direct-Chroma builder (no crop/patch/DB); use init_and_download.sh
 │   ├── crop_reference.py     # Crop raw refs with YOLOE
-│   ├── init_and_download.sh  # Reinit DB + Chroma + patches, add SKUs from SKUDB/, download crops; --test/-t N/-T for limited runs; event-driven progress
+│   ├── init_and_download.sh  # Reinit DB + Chroma + patches + colors, add SKUs from SKUDB/, download crops; --test/-t N/-T for limited runs; event-driven progress
 │   ├── sync_local.sh         # Sync from remote to local
 │   ├── sync_remote.sh        # Sync to remote server
 │   └── test_detection.py     # Detection test script
@@ -67,6 +69,8 @@ sku-match/
 │   ├── CONSIDERATIONS.md     # Evaluated improvements (SAHI, FAISS, Qdrant, etc.)
 │   ├── IMAGE_SIMILARITY_SEARCH_REPORT.md
 │   ├── PATCH_TOKENS.md       # Fused retrieval + patch re-ranking pipeline documentation
+│   ├── COLOUR_HISTOGRAMS.md  # Color histograms: theory, DINOv2 color-blindness evidence, extraction algorithm
+│   ├── COLOUR_HISTOGRAMS_PLAN.md # Color re-ranking implementation plan (decisions, module specs)
 │   ├── PERF_PLAN.md          # Performance improvement plan
 │   ├── PLAN.md               # API server implementation plan
 │   ├── QINIU.md              # Qiniu CDN integration docs
@@ -76,7 +80,8 @@ sku-match/
 │   ├── images/               # Input images (CLI mode)
 │   ├── references/           # SKU reference images (sku_id/*.jpg)
 │   ├── references_raw/       # Original photos to be cropped
-│   └── patches/              # Patch token .npy files for re-ranking (gitignored)
+│   ├── patches/              # Patch token .npy files for re-ranking (gitignored)
+│   └── colors/               # Color descriptor .npy files for re-ranking (gitignored)
 ├── models/                   # YOLOE weights, mobileclip2_b.ts
 ├── vendor/
 │   └── clip_package/         # Vendored clip package (GFW-safe)
@@ -101,7 +106,9 @@ sku-match/
 | Feature fusion | src/features.py | Features dataclass, GeM pooling, fused CLS+GeM embedding |
 | SKU indexer | src/indexer.py | Chroma-backed: search_batch, score_matches with top-2-per-SKU scoring |
 | Patch storage | src/patch_store.py | Per-image patch token .npy files for re-ranking |
-| Patch re-ranking | src/reranker.py | Max-of-mean patch similarity + blended scoring (β×patch + (1−β)×coarse) |
+| Color descriptor | src/color.py | extract_color_descriptor: HSV histogram (49-dim) for color re-ranking |
+| Color storage | src/color_store.py | Per-image color descriptor .npy files (mirrors PatchStore) |
+| Re-ranking | src/reranker.py | Patch max-of-mean + optional 3-way color blend (β×patch + γ×color + (1−β−γ)×coarse) |
 | Detection + matching | src/matcher.py | SKUMatcher class with crop saving |
 | Masking | src/masking.py | extract_binary_masks, mask_background with configurable background color |
 | Reference processing | src/reference_processor.py | crop→embed→index pipeline, on-demand CROP_MODEL, build_from_directory() |
@@ -146,7 +153,14 @@ sku-match/
 | PatchStore.save() | method | src/patch_store.py:38 | Save patch tokens for a doc_id |
 | PatchStore.load_batch() | method | src/patch_store.py:69 | Load patch tokens for multiple doc_ids (silent skip missing) |
 | PatchStore.delete_sku() | method | src/patch_store.py:95 | Delete all patch files for a SKU |
-| rerank() | function | src/reranker.py:71 | Re-rank coarse candidates using patch-to-patch matching |
+| ColorStore | class | src/color_store.py:19 | Manages color descriptor .npy files on disk (mirrors PatchStore) |
+| ColorStore.save() | method | src/color_store.py:38 | Save color descriptor for a doc_id |
+| ColorStore.load_batch() | method | src/color_store.py:69 | Load color descriptors for multiple doc_ids (silent skip missing) |
+| ColorStore.delete_sku() | method | src/color_store.py:95 | Delete all color files for a SKU |
+| extract_color_descriptor() | function | src/color.py:15 | HSV histogram descriptor (49-dim, L2-normalized) from RGB crop |
+| color_descriptor_dim() | function | src/color.py:67 | Descriptor length for n_bins (3*n_bins+1); single source of truth for the dim invariant |
+| SKUIndexer.validate_color_dim() | method | src/indexer.py:284 | Startup guard: indexed vectors' `color_dim` metadata vs expected; fails fast on COLOR_BINS drift / index built without color |
+| rerank() | function | src/reranker.py:83 | Re-rank coarse candidates: patch matching + optional 3-way color blend |
 | max_of_mean_similarity() | function | src/reranker.py:47 | Bidirectional max-of-mean patch similarity |
 | RerankCandidate | dataclass | src/reranker.py:23 | Single vector-level candidate after re-ranking |
 | SKURerankResult | dataclass | src/reranker.py:35 | Aggregated re-ranking result for one SKU |
@@ -277,7 +291,8 @@ sku-match/
 - **Detection classes**: `BEVERAGE_CONTAINER_CLASSES` (7 items: bottle, canned, carton, empty paper box, full paper box, strawed drink, keg)
 - **Index**: Chroma vector store with cosine similarity, top-2-per-SKU scoring. Unified path: `chroma_data/`
 - **Feature fusion**: `USE_FUSED_FEATURES` (default true) controls CLS+GeM vs CLS-only embeddings. `feature_type` recorded in ChromaDB metadata, hard error on mismatch.
-- **Patch re-ranking**: Two independent toggles: `USE_FUSED_FEATURES` (stage 1) and `USE_RERANKING` (stage 2, default true). Blend: `β × patch_score + (1−β) × norm_coarse` (β=0.7 default, `RERANK_BLEND_BETA`). β=1 = pure patch, β=0 = pure coarse.
+- **Patch re-ranking**: Two independent toggles: `USE_FUSED_FEATURES` (stage 1) and `USE_RERANKING` (stage 2, default true). Blend: `β × patch_score + (1−β) × norm_coarse` (β=0.8 default, `RERANK_BLEND_BETA`). β=1 = pure patch, β=0 = pure coarse.
+- **Color re-ranking**: Optional stage toggled by `USE_COLOR_RERANK` (default true, API-only). Extends the patch blend to a 3-way simplex: `β × patch + γ × color + (1−β−γ) × norm_coarse` (β=`RERANK_BLEND_BETA`, γ=`COLOR_GAMMA` default 0.0). Constraint: `β+γ ≤ 1` (validated at startup + rerank entry). Color = HSV histogram (49-dim, `extract_color_descriptor`) from the raw YOLO crop, persisted per-image via `ColorStore` (mirrors `PatchStore`). With the default γ=0 the color stage is **inert at blend-time** (existing 2-way blend unchanged), but `USE_COLOR_RERANK=true` still activates the color store + `validate_color_dim` startup guard — so the index **must be built with color descriptors** or the server refuses to boot. Raise `COLOR_GAMMA>0` to contribute color to ranking. Re-scores existing candidates only (no candidate-pool expansion). Descriptor dim (`3*COLOR_BINS+1`) is written as `color_dim` per-vector metadata at index time and checked by `SKUIndexer.validate_color_dim()` at startup when color is enabled (fail-fast on COLOR_BINS drift / index built without color). See docs/COLOUR_HISTOGRAMS.md + docs/COLOUR_HISTOGRAMS_PLAN.md.
 - **CROP_MODEL**: Separate YOLOE model for cropping reference images. Empty string reuses DET_MODEL (backward compatible). Loaded on-demand, unloaded immediately after crop. Runs in FP32.
 - **API prefix**: `/api/v1/`
 - **API response**: All endpoints return `ApiResponse(code=1/0, data=..., msg="success")` with `response_model=ApiResponse`
@@ -395,4 +410,4 @@ apt-get install fonts-noto-cjk
 - **Shared pipeline**: `parse_detections()` (src/core.py) and `score_matches()` (src/indexer.py) used by both CLI matcher and API recognition service.
 - **process_single_media()**: Shared download→embed→upload→cleanup helper in api/tasks.py, used by both start_embed_task and manage_media route.
 - **Masking module**: `src/masking.py` — configurable background color (default ImageNet mean RGB). Used by CLI detection and reference processor.
-- **Init script**: `scripts/init_and_download.sh` wipes DB + Chroma + `data/patches/` to prevent stale doc_id mismatches after re-indexing. Rebuilds via API `/goods/sku/new` endpoints. Supports `--test/-t N/-T` flags for limited test runs. Embedding progress is event-driven (prints only on completion/failure) with a failure-focused summary table.
+- **Init script**: `scripts/init_and_download.sh` wipes DB + Chroma + `data/patches/` + `data/colors/` to prevent stale doc_id mismatches after re-indexing. Rebuilds via API `/goods/sku/new` endpoints. Supports `--test/-t N/-T` flags for limited test runs. Embedding progress is event-driven (prints only on completion/failure) with a failure-focused summary table.
