@@ -65,7 +65,7 @@ def main():
             continue
 
         detections = data["data"].get("detections", [])
-        matched_image = data["data"].get("matched_image", "")
+        matched_image = data["data"].get("matchedImage", "")
         print(f"  {len(detections)} detections -> {raw_json}")
 
         # Download annotated image

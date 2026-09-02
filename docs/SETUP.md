@@ -71,8 +71,9 @@ Supported variants (selected via `EMB_MODEL` / `--emb-model` / `-m`):
 
 | Model ID | Dimensions | Notes |
 |----------|-----------|-------|
-| `facebook/dinov2-small` (default API) | 384-dim | Fastest |
+| `facebook/dinov2-small` | 384-dim | Fastest |
 | `facebook/dinov2-base` (default CLI) | 768-dim | Balanced |
+| `dinov2-with-registers-base` (default API) | 768-dim | Registers variant (cleaner features) |
 | `facebook/dinov2-large` | 1024-dim | Higher accuracy |
 | `facebook/dinov2-giant` | 1536-dim | Best accuracy |
 | `facebook/dinov2-*-with-registers` | same | Registers variants (cleaner features) |
@@ -99,13 +100,13 @@ touch .env
 | `DEBUG` | `false` | Enable debug mode (uvicorn auto-reload) |
 | **Models** | | |
 | `DET_MODEL` | `models/yoloe-26l-seg.pt` | YOLOE detection model path |
-| `EMB_MODEL` | `facebook/dinov2-small` | HuggingFace DINOv2 model ID (e.g., `facebook/dinov2-base`, `facebook/dinov2-large-with-registers`) |
+| `EMB_MODEL` | `models/dinov2-with-registers-base` | DINOv2 model path or HuggingFace ID (e.g., `facebook/dinov2-base`, `facebook/dinov2-large-with-registers`) |
 | `DEVICE` | _(auto)_ | Force device: `cuda`, `mps`, `cpu`. Auto-detects if unset. |
 | `USE_ONNX` | `false` | Use Optimum ONNX Runtime for embedding inference |
 | **Detection** | | |
 | `DET_CONF` | `0.25` | YOLOE detection confidence threshold |
 | `IMGSZ` | `1280` | Inference image size |
-| `MATCH_CONF` | `0.5` | SKU match confidence threshold |
+| `MATCH_CONF` | `0` | SKU match confidence threshold (0 = disabled) |
 | `CONCENTRATION_TOPK` | `10` | Top-K for concentration score calculation |
 | **Storage** | | |
 | `DATA_DIR` | `data` | Data directory |

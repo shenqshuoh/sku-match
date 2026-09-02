@@ -101,7 +101,7 @@ def draw_annotations(
 
     Args:
         image: Original image as numpy array (RGB, HxWx3)
-        detections: List of dicts with keys: bbox (list[float]), sku_name (str), match_score (float)
+        detections: List of dicts with keys: bbox (list[float]), skuName (str), matchScore (float)
         output_path: Where to save the annotated image
 
     Returns:
@@ -116,8 +116,8 @@ def draw_annotations(
 
     for det in detections:
         x1, y1, x2, y2 = map(int, det["bbox"])
-        sku_name = det.get("sku_name", "unknown")
-        score = det.get("match_score", 0.0)
+        sku_name = det.get("skuName", "unknown")
+        score = det.get("matchScore", 0.0)
 
         # Bounding box (green)
         draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)

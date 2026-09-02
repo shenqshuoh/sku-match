@@ -35,6 +35,7 @@ class RecognitionService:
         imgsz: int = 1280,
         match_conf: float = 0.5,
         concentration_topk: int = 10,
+        distribution_top_k: int = 10,
         patch_store: PatchStore | None = None,
         use_reranking: bool = True,
         rerank_top_k: int = 50,
@@ -52,6 +53,7 @@ class RecognitionService:
         self.imgsz = imgsz
         self.match_conf = match_conf
         self.concentration_topk = concentration_topk
+        self.distribution_top_k = distribution_top_k
         self.patch_store = patch_store
         self.use_reranking = use_reranking
         self.rerank_top_k = rerank_top_k
@@ -175,7 +177,7 @@ class RecognitionService:
             return {
                 "counts": {},
                 "detections": [],
-                "matched_image": self.image_storage.get_result_url(task_id),
+                "matchedImage": self.image_storage.get_result_url(task_id),
                 "taskId": task_id,
             }
 
@@ -236,20 +238,24 @@ class RecognitionService:
                 counts[sku_id] = counts.get(sku_id, 0) + 1
 
             ranked = sorted((match.sku_distribution or {}).items(), key=lambda x: x[1], reverse=True)
-            top5_distribution = dict(ranked[:5]) if confidence >= self.match_conf else {}
+            top_n = ranked[:self.distribution_top_k] if confidence >= self.match_conf else []
+            top_distribution = {
+                sid: {"skuName": self.indexer.get_sku_name(sid) or sid, "score": prob}
+                for sid, prob in top_n
+            }
 
             detection_items.append({
                 "itemId": i,
                 "bbox": list(match.detection.bbox),
-                "class_id": match.detection.class_id,
-                "class_name": match.detection.class_name,
-                "detection_conf": match.detection.confidence,
-                "sku_id": sku_id,
-                "sku_name": sku_name,
-                "match_score": confidence,
-                "match_concentration": match_concentration,
-                "sku_distribution": top5_distribution,
-                "matched_vector_tags": matched_vector_tags,
+                "classId": match.detection.class_id,
+                "className": match.detection.class_name,
+                "detectionConf": match.detection.confidence,
+                "skuId": sku_id,
+                "skuName": sku_name,
+                "matchScore": confidence,
+                "matchConcentration": match_concentration,
+                "skuDistribution": top_distribution,
+                "matchedVectorTags": matched_vector_tags,
             })
 
         annotated_path = self.image_storage.get_result_path(task_id)
@@ -258,6 +264,6 @@ class RecognitionService:
         return {
             "counts": counts,
             "detections": detection_items,
-            "matched_image": self.image_storage.get_result_url(task_id),
+            "matchedImage": self.image_storage.get_result_url(task_id),
             "taskId": task_id,
         }

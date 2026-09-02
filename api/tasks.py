@@ -5,7 +5,7 @@ import logging
 from sqlalchemy import select, update
 
 from api.database import async_session
-from api.models import SKU, TrainJob
+from api.models import SKU, SKUMedia, TrainJob
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +23,12 @@ async def process_single_media(
 ) -> bool:
     """Download, embed, upload masked crop, and cleanup for a single media item.
 
-    Returns True on success, False on failure.
+    Returns True on success, False on failure (including download failure —
+    callers rely on False to flag the media row as failed).
     """
-    local_path = await image_storage.download_image(media_url)
+    local_path = None
     try:
+        local_path = await image_storage.download_image(media_url)
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             inference_executor,
@@ -49,7 +51,8 @@ async def process_single_media(
         logger.exception("Failed to process media %s", media_url)
         return False
     finally:
-        image_storage.cleanup_download(local_path)
+        if local_path is not None:
+            image_storage.cleanup_download(local_path)
 
 
 async def start_embed_task(
@@ -71,9 +74,13 @@ async def start_embed_task(
                 tj = result.scalar_one_or_none()
                 if tj is not None:
                     tj.status = "indexing"
+                    await session.execute(
+                        update(SKU).where(SKU.sku_id == sku_id).values(train_status="indexing")
+                    )
                     await session.commit()
 
             embedding_failed: list[str] = []
+            failed_media_ids: list[str] = []
 
             for idx, (url, media_id) in enumerate(zip(media_urls, media_ids), start=1):
                 success = await process_single_media(
@@ -82,6 +89,7 @@ async def start_embed_task(
                 )
                 if not success:
                     embedding_failed.append(url)
+                    failed_media_ids.append(media_id)
 
                 progress = int((idx / max(len(media_urls), 1)) * 100)
                 async with async_session() as session:
@@ -95,24 +103,38 @@ async def start_embed_task(
             failed_json = json.dumps(embedding_failed) if embedding_failed else None
 
             if embedding_failed:
-                train_status = f"FAILED: {len(embedding_failed)}/{len(media_urls)}"
+                sku_status = "failed"
                 logger.warning(
                     "Indexing task completed with %d/%d failed images: train_job_id=%s",
                     len(embedding_failed), len(media_urls), train_job_id,
                 )
             else:
-                train_status = "SUCCESS"
+                sku_status = "completed"
                 logger.info("Indexing task completed: train_job_id=%s", train_job_id)
 
             async with async_session() as session:
                 await session.execute(
                     update(TrainJob)
                     .where(TrainJob.train_job_id == train_job_id)
-                    .values(status="completed", progress=100, embedding_failed=failed_json)
+                    .values(
+                        status="completed",
+                        progress=100,
+                        embedding_failed=failed_json,
+                        failed_count=len(embedding_failed),
+                        total_count=len(media_urls),
+                    )
                 )
                 await session.execute(
-                    update(SKU).where(SKU.sku_id == sku_id).values(train_status=train_status)
+                    update(SKU).where(SKU.sku_id == sku_id).values(train_status=sku_status)
                 )
+                # Flag failed media rows so the SKU list shows exactly which
+                # reference images need manual intervention
+                if failed_media_ids:
+                    await session.execute(
+                        update(SKUMedia)
+                        .where(SKUMedia.media_id.in_(failed_media_ids))
+                        .values(failed=True)
+                    )
                 await session.commit()
 
         except Exception:
@@ -124,7 +146,7 @@ async def start_embed_task(
                     .values(status="failed")
                 )
                 await session.execute(
-                    update(SKU).where(SKU.sku_id == sku_id).values(train_status="FAILED")
+                    update(SKU).where(SKU.sku_id == sku_id).values(train_status="failed")
                 )
                 await session.commit()
 

@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     MODELS_DIR: str = "models"
     CHROMA_PERSIST_DIR: str = "chroma_data"
     RESULTS_DIR: str = "results"
+    REFERENCE_DIR: str = "/opt/SKUDB"
     DATABASE_URL: str = "sqlite+aiosqlite:///./sku_match.db"
 
     DET_MODEL: str = "models/yoloe-26l-seg.pt"
@@ -17,6 +18,7 @@ class Settings(BaseSettings):
     IMGSZ: int = 1280
     MATCH_CONF: float = 0
     CONCENTRATION_TOPK: int = 10
+    DISTRIBUTION_TOP_K: int = 10
     USE_ONNX: bool = False
 
     # Scoring
@@ -47,7 +49,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     DOWNLOAD_TIMEOUT: int = 30
-    RESULTS_MAX_AGE_HOURS: int = 24  # Annotated images older than this are cleaned up
+    RESULTS_MAX_AGE_HOURS: int = 72  # Retention for ALL local result files (annotated, inputs, annotated_original)
     LOG_FILE: str = "/tmp/sku-match-api.log"  # File-based log for init script crop downloads
 
     API_KEY: str = ""  # Empty = auth disabled

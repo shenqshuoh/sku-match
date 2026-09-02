@@ -1,19 +1,19 @@
 import asyncio
 import concurrent.futures
-import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import chromadb
 from fastapi import Depends, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLOE
 
 from api.auth import check_rate_limit, verify_api_key
 from api.config import settings
 from api.database import init_db
+from api.responses import UnicodeJSONResponse
 from api.routes import goods, logs, recognition, system
 from api.services.image_storage import ImageStorage
 from api.services.recognition import RecognitionService
@@ -162,6 +162,7 @@ async def lifespan(app: FastAPI):
         imgsz=settings.IMGSZ,
         match_conf=settings.MATCH_CONF,
         concentration_topk=settings.CONCENTRATION_TOPK,
+        distribution_top_k=settings.DISTRIBUTION_TOP_K,
         patch_store=patch_store,
         use_reranking=settings.USE_RERANKING,
         rerank_top_k=settings.RERANK_TOP_K,
@@ -210,7 +211,7 @@ async def lifespan(app: FastAPI):
                     settings.RESULTS_MAX_AGE_HOURS,
                 )
             except Exception:
-                logger.exception("Failed to clean up old annotated images")
+                logger.exception("Failed to clean up old result images")
 
     cleanup_task = asyncio.create_task(_results_cleanup_loop())
     app.state._cleanup_task = cleanup_task
@@ -236,16 +237,19 @@ async def lifespan(app: FastAPI):
         pass
 
 
-class UnicodeJSONResponse(JSONResponse):
-    def render(self, content) -> bytes:
-        return json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
-
-
 app = FastAPI(
     title="SKU Match API",
     version="0.2.0",
     lifespan=lifespan,
     default_response_class=UnicodeJSONResponse,
+)
+
+# CORS: allow all origins for local testing / internal verification
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_headers=["X-API-Key", "Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
 )
 
 # Register routers
@@ -267,6 +271,11 @@ async def health():
 results_path = Path(settings.RESULTS_DIR)
 results_path.mkdir(parents=True, exist_ok=True)
 app.mount("/results", StaticFiles(directory=str(results_path)), name="results")
+
+# Serve reference images for inspection (only if directory exists)
+ref_path = Path(settings.REFERENCE_DIR)
+if ref_path.exists():
+    app.mount(settings.REFERENCE_DIR, StaticFiles(directory=str(ref_path)), name="references")
 
 
 def _setup_file_logging() -> None:

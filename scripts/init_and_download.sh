@@ -108,10 +108,13 @@ for folder in $(ls -1 "$REF_DIR" | sort); do
         break
     fi
 
-    # Folder name is the sku_id; sku_name from the CSV (fallback: folder name).
-    sku_id="$folder"
-    sku_name="${name_map[$sku_id]:-$folder}"
-    train_job_id="job_${sku_id}_$(date +%s)"
+    # sku_name from the CSV (fallback: folder name); folder's numeric prefix is
+    # stripped because the API now auto-numbers every submitted (bare) skuId.
+    # On a fresh DB with sequentially-numbered folders, renumbering reproduces
+    # identical final ids (sorted order, starting at 100001).
+    sku_id="$(printf '%s' "$folder" | sed -E 's/^[0-9]+_//')"
+    sku_name="${name_map[$folder]:-$folder}"
+    train_job_id="job_${folder}_$(date +%s)"
 
     # Read ignore list
     ignore_file="$dirpath/ignore.txt"
@@ -180,7 +183,7 @@ skus = data.get('data', {}).get('list', [])
 
 def terminal(st):
     st = st or ''
-    return st == 'SUCCESS' or st.startswith('FAILED')
+    return st in ('completed', 'failed')
 
 processing = sum(1 for s in skus if not terminal(s.get('trainStatus')))
 print(f'{len(skus)}\t{processing}')
@@ -200,7 +203,7 @@ for s in skus:
         seen[$sid]=1
         done_count=$((done_count + 1))
         new=$((new + 1))
-        if [ "$st" = "SUCCESS" ]; then
+        if [ "$st" = "completed" ]; then
             echo "  [$done_count/$total_skus] ✓ $sid  ($mcount imgs)"
         else
             echo "  [$done_count/$total_skus] ✗ $sid  $st"
@@ -230,10 +233,10 @@ skus = data.get('data', {}).get('list', [])
 
 def terminal(st):
     st = st or ''
-    return st == 'SUCCESS' or st.startswith('FAILED')
+    return st in ('completed', 'failed')
 
-success = [s for s in skus if (s.get('trainStatus') or '') == 'SUCCESS']
-failed  = [s for s in skus if (s.get('trainStatus') or '').startswith('FAILED')]
+success = [s for s in skus if (s.get('trainStatus') or '') == 'completed']
+failed  = [s for s in skus if (s.get('trainStatus') or '') == 'failed']
 pending = [s for s in skus if not terminal(s.get('trainStatus'))]
 
 if success:
@@ -259,7 +262,8 @@ mkdir -p "$OUT_DIR"
 # Processed-crop CDN URLs exist only in the API log ("Uploaded crop_... -> <cdn>"),
 # so we grep it. sku_id now contains an underscore (e.g. 100014_nfsqkqs), so positional
 # awk splitting is ambiguous; instead match the crop filename prefix against the known
-# sku_ids loaded into name_map above. Since sku_id == folder, output goes to $OUT_DIR/$sku_id.
+# folder names in name_map above. On a standard sequential rebuild the API-assigned
+# ids equal the folder names, so output goes to $OUT_DIR/$folder.
 total=0
 ok=0
 fail=0

@@ -1,4 +1,5 @@
 import logging
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,23 +34,56 @@ class ImageStorage:
         self._qiniu_token: str = ""
         self._qiniu_token_deadline: float = 0
 
-    def cleanup_old_results(self, max_age_hours: int = 24) -> int:
-        """Delete annotated images older than max_age_hours. Returns count of deleted files."""
-        annotated_dir = self.results_dir / "annotated"
-        if not annotated_dir.exists():
-            return 0
+    def cleanup_old_results(self, max_age_hours: int = 72) -> int:
+        """Delete expired files across all results subdirectories. Returns count of deleted files.
+
+        Covers annotated/ (final annotation images), inputs/ (persisted source images),
+        and annotated_original/ (pre-fix annotation snapshots).
+        """
         cutoff = time.time() - max_age_hours * 3600
         deleted = 0
-        for f in annotated_dir.iterdir():
-            if f.is_file() and f.stat().st_mtime < cutoff:
-                try:
-                    f.unlink()
-                    deleted += 1
-                except Exception:
-                    logger.warning("Failed to delete old annotated image: %s", f, exc_info=True)
+        for sub in ("annotated", "inputs", "annotated_original"):
+            sub_dir = self.results_dir / sub
+            if not sub_dir.exists():
+                continue
+            for f in sub_dir.iterdir():
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    try:
+                        f.unlink()
+                        deleted += 1
+                    except Exception:
+                        logger.warning("Failed to delete old file: %s", f, exc_info=True)
         if deleted:
-            logger.info("Cleaned up %d annotated images older than %dh", deleted, max_age_hours)
+            logger.info("Cleaned up %d expired files older than %dh", deleted, max_age_hours)
         return deleted
+
+    def get_input_path(self, task_id: str) -> Path:
+        inputs_dir = self.results_dir / "inputs"
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        return inputs_dir / f"{task_id}_original.jpg"
+
+    def get_input_url(self, task_id: str) -> str:
+        """Servable local static URL for the persisted input image."""
+        return f"/results/inputs/{task_id}_original.jpg"
+
+    def persist_input(self, downloaded_path: Path, task_id: str) -> Path:
+        """Move a downloaded source image into the inputs store for fix-time re-annotation."""
+        dest = self.get_input_path(task_id)
+        shutil.move(str(downloaded_path), str(dest))
+        logger.debug("Persisted input for %s -> %s", task_id, dest)
+        return dest
+
+    def get_annotated_original_path(self, task_id: str) -> Path:
+        """Path of the pre-fix annotation snapshot (frozen at first fix)."""
+        orig_dir = self.results_dir / "annotated_original"
+        orig_dir.mkdir(parents=True, exist_ok=True)
+        return orig_dir / f"{task_id}_annotated.jpg"
+
+    def cdn_key_from_url(self, url: str) -> str | None:
+        """Extract the Qiniu storage key from a CDN URL (inverse of upload_to_qiniu)."""
+        if self.qiniu_domain and url.startswith(self.qiniu_domain):
+            return url[len(self.qiniu_domain):]
+        return None
 
     async def download_image(self, url: str) -> Path:
         downloads_dir = self.results_dir / "downloads"
@@ -126,6 +160,15 @@ class ImageStorage:
         now = datetime.now(tz=timezone.utc)
         date_path = now.strftime("%Y-%m/%d")
         return f"{self.qiniu_key_prefix}{date_path}/{filename}"
+
+    def annotated_key(self, task_id: str, version: int) -> str:
+        """Versioned key for the final annotation image.
+
+        Insert-only upload tokens reject same-key overwrites (Qiniu 614), so every
+        write gets a fresh version: detect = v1, each fix = v+1. Callers must store
+        the returned URL (visual_image_path / matchedImage) — it changes per version.
+        """
+        return self._build_qiniu_key(f"{task_id}_annotated_v{version}.jpg")
 
     async def upload_to_qiniu(self, file_path: Path, key: str | None = None) -> str:
         """Upload a file to Qiniu and return the full CDN URL.

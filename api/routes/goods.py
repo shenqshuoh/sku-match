@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,6 +21,7 @@ from api.dependencies import (
     get_processor,
 )
 from api.models import SKU, SKUMedia, TrainJob
+from api.responses import error_response, to_full_url
 from api.schemas import (
     ApiResponse,
     MediaResponse,
@@ -45,8 +48,22 @@ async def _get_sku_or_error(db: AsyncSession, sku_id: str):
     """Fetch SKU by sku_id, returning ApiResponse error if not found."""
     sku = await db.scalar(select(SKU).where(SKU.sku_id == sku_id))
     if sku is None:
-        return None, ApiResponse(code=0, msg=f"skuId '{sku_id}' not found")
+        return None, error_response(f"skuId '{sku_id}' not found", status_code=404)
     return sku, None
+
+
+_NUM_PREFIX_RE = re.compile(r"^(\d+)_")
+
+
+def _sku_id_suffix(sku_id: str) -> str:
+    """The bare part of a stored sku_id (everything after a leading numeric prefix)."""
+    return _NUM_PREFIX_RE.sub("", sku_id, count=1)
+
+
+def _next_sku_number(all_ids: list[str]) -> int:
+    """Max leading numeric prefix + 1 (starts at 100001 on an empty table)."""
+    numbers = [int(m.group(1)) for sid in all_ids if (m := _NUM_PREFIX_RE.match(sid))]
+    return max(numbers, default=100000) + 1
 
 
 @router.post("/sku/new", response_model=ApiResponse)
@@ -57,39 +74,60 @@ async def new_sku(
     inference_executor: ThreadPoolExecutor = Depends(get_inference_executor),
     db: AsyncSession = Depends(get_db),
 ):
-    # 1. Check for duplicate skuId and trainJobId
-    existing_sku = await db.scalar(select(SKU).where(SKU.sku_id == request.skuId))
+    # 1. Auto-number: the submitted skuId is the verbatim bare suffix; the server
+    #    always prepends the next sequence number (never mutates the bare part).
+    bare = request.skuId
+    all_skus = (await db.execute(select(SKU.sku_id, SKU.sku_name))).fetchall()
+
+    # Duplicate gate: same bare suffix AND same name -> probable double submission.
+    # Same suffix with a different name is allowed (numbering proceeds).
+    for sid, sname in all_skus:
+        if _sku_id_suffix(sid) == bare and sname == request.skuName:
+            return error_response(
+                f"sku '{bare}' with name '{request.skuName}' already exists as '{sid}'",
+                status_code=409,
+            )
+
+    final_id = f"{_next_sku_number([sid for sid, _ in all_skus])}_{bare}"
+
+    existing_sku = await db.scalar(select(SKU).where(SKU.sku_id == final_id))
     if existing_sku is not None:
-        return ApiResponse(code=0, msg=f"skuId '{request.skuId}' already exists")
+        return error_response(f"skuId '{final_id}' already exists", status_code=409)
     existing_job = await db.scalar(select(TrainJob).where(TrainJob.train_job_id == request.trainJobId))
     if existing_job is not None:
-        return ApiResponse(code=0, msg=f"trainJobId '{request.trainJobId}' already exists")
+        return error_response(f"trainJobId '{request.trainJobId}' already exists", status_code=409)
 
-    # 2. Insert SKU
-    sku = SKU(sku_id=request.skuId, sku_name=request.skuName, enabled=True, train_status="PENDING")
+    # 2. Insert SKU (unique-constraint backstop for concurrent next-number races)
+    sku = SKU(sku_id=final_id, sku_name=request.skuName, enabled=True, train_status="pending")
     db.add(sku)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return error_response(
+            f"skuId '{final_id}' already exists (concurrent add) — retry", status_code=409
+        )
 
     # 3. Insert SKUMedia rows
     media_urls: List[str] = []
     media_ids: List[str] = []
     for url in request.files:
         media_id = uuid.uuid4().hex
-        media = SKUMedia(media_id=media_id, sku_id=request.skuId, media_url=url, media_type="IMAGE")
+        media = SKUMedia(media_id=media_id, sku_id=final_id, media_url=url, media_type="IMAGE")
         db.add(media)
         media_urls.append(url)
         media_ids.append(media_id)
     await db.commit()
 
     # 4. Create TrainJob
-    train_job = TrainJob(train_job_id=request.trainJobId, sku_id=request.skuId, status="pending", progress=0)
+    train_job = TrainJob(train_job_id=request.trainJobId, sku_id=final_id, status="pending", progress=0)
     db.add(train_job)
     await db.commit()
 
     # 5. Start embedding task
     await start_embed_task(
         train_job_id=request.trainJobId,
-        sku_id=request.skuId,
+        sku_id=final_id,
         media_urls=media_urls,
         media_ids=media_ids,
         processor=processor,
@@ -98,8 +136,8 @@ async def new_sku(
         inference_executor=inference_executor,
     )
 
-    # 6. Return identifiers
-    return ApiResponse(data={"skuId": request.skuId, "trainJobId": request.trainJobId})
+    # 6. Return identifiers (final auto-numbered skuId — clients must read this)
+    return ApiResponse(data={"skuId": final_id, "trainJobId": request.trainJobId})
 
 
 @router.post("/sku/update", response_model=ApiResponse)
@@ -173,24 +211,40 @@ async def enable_sku(
     return ApiResponse(data={})
 
 
-def _to_full_url(request: Request, path: str) -> str:
-    """Convert a relative path to a full URL using the request's base URL."""
-    if path.startswith(("http://", "https://")):
-        return path
-    base = str(request.base_url).rstrip("/")
-    return f"{base}{path}"
+_VALID_TRAIN_STATUSES = {"pending", "indexing", "completed", "failed"}
 
 
 @router.get("/sku/list", response_model=ApiResponse)
-async def list_skus(request: Request, page: int = 1, size: int = 20, keyword: str | None = None, db: AsyncSession = Depends(get_db)):
+async def list_skus(
+    request: Request,
+    page: int = 1,
+    size: int = 20,
+    keyword: str | None = None,
+    trainStatus: str | None = None,
+    enabled: bool | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    # Validate trainStatus (enabled is typed by FastAPI — bad values become 422 automatically)
+    if trainStatus is not None and trainStatus not in _VALID_TRAIN_STATUSES:
+        return error_response(
+            f"trainStatus must be one of {sorted(_VALID_TRAIN_STATUSES)}, got '{trainStatus}'",
+            status_code=400,
+        )
+
     offset = (page - 1) * size
     kw = f"%{keyword}%" if keyword else None
-    base = select(SKU).options(selectinload(SKU.medias))
-    if kw:
-        base = base.where(or_(SKU.sku_id.ilike(kw), SKU.sku_name.ilike(kw)))
-    total_q = select(func.count(SKU.id))
-    if kw:
-        total_q = total_q.where(or_(SKU.sku_id.ilike(kw), SKU.sku_name.ilike(kw)))
+
+    def apply_filters(q):
+        if kw:
+            q = q.where(or_(SKU.sku_id.ilike(kw), SKU.sku_name.ilike(kw)))
+        if trainStatus is not None:
+            q = q.where(SKU.train_status == trainStatus)
+        if enabled is not None:
+            q = q.where(SKU.enabled == enabled)
+        return q
+
+    base = apply_filters(select(SKU).options(selectinload(SKU.medias)))
+    total_q = apply_filters(select(func.count(SKU.id)))
     total_res = await db.execute(total_q)
     total = total_res.scalar_one()
     result = await db.execute(base.offset(offset).limit(size))
@@ -207,7 +261,8 @@ async def list_skus(request: Request, page: int = 1, size: int = 20, keyword: st
                     MediaResponse(
                         mediaId=m.media_id,
                         mediaType=m.media_type,
-                        mediaUrl=_to_full_url(request, m.media_url),
+                        mediaUrl=to_full_url(request, m.media_url) or "",
+                        failed=m.failed,
                     )
                     for m in s.medias
                 ],
@@ -237,7 +292,7 @@ async def manage_media(
         # Validate: mediaUrl is required for add action
         for item in request.media:
             if not item.mediaUrl:
-                return ApiResponse(code=0, msg="mediaUrl is required for add action")
+                return error_response("mediaUrl is required for add action", status_code=400)
         # Check SKU exists
         sku, err = await _get_sku_or_error(db, request.skuId)
         if err:
@@ -260,12 +315,18 @@ async def manage_media(
                     media_id=media_id, sku_id=request.skuId,
                     media_url=item.mediaUrl, media_type="IMAGE",
                 )
-                db.add(media)
-                await db.commit()
             else:
+                # Keep the failed image visible in the media list (flagged) so the
+                # operator can see exactly which reference didn't produce a crop
+                media = SKUMedia(
+                    media_id=media_id, sku_id=request.skuId,
+                    media_url=item.mediaUrl, media_type="IMAGE", failed=True,
+                )
                 embedding_failed.append(item.mediaUrl or "")
+            db.add(media)
+            await db.commit()
         if embedding_failed:
-            return ApiResponse(code=0, msg="Some images failed to embed", data={"embedding_failed": embedding_failed})
+            return ApiResponse(code=0, msg="Some images failed to embed", data={"embeddingFailed": embedding_failed})
         return ApiResponse(data={})
     elif request.action == "delete":
         for item in request.media:
@@ -281,4 +342,4 @@ async def manage_media(
                 await asyncio.to_thread(color_store.delete, doc_id)
         return ApiResponse(data={})
     else:
-        return ApiResponse(code=0, msg="Unsupported action")
+        return error_response(f"Unsupported action: '{request.action}'", status_code=400)
