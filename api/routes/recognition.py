@@ -295,20 +295,58 @@ async def fix(
                 status_code=400,
             )
 
-        # 3. Validate itemIds against the original result
-        known_ids = {d.get("itemId") for d in detections}
+        # 2b. Base for this fix: the current corrected result when present (fixes are
+        #     incremental — prior fixes are kept), otherwise the original result
+        final = None
+        if log.final_result_json:
+            try:
+                loaded = json.loads(log.final_result_json)
+                if isinstance(loaded, dict) and isinstance(loaded.get("detections"), list):
+                    final = loaded
+            except json.JSONDecodeError:
+                logger.warning(
+                    "final_result_json corrupt for %s, rebasing on original", request.taskId
+                )
+        if final is None:
+            final = json.loads(log.ai_result_json)  # fresh copy — original stays immutable
+
+        # 3. Validate itemIds against the current result (items removed by an
+        #    earlier fix can no longer be referenced). fixType "add" creates a
+        #    new entry and carries no itemId.
+        final_dets = final["detections"]
+        known_ids = {d.get("itemId") for d in final_dets}
         for fi in request.fixItems:
-            if fi.itemId not in known_ids:
+            if fi.fixType != "add" and fi.itemId not in known_ids:
                 return error_response(
                     f"itemId {fi.itemId} not found in taskId '{request.taskId}'",
                     status_code=400,
                 )
 
-        # 4. Apply fixes to a fresh copy of the original result.
-        #    ai_result_json stays immutable — this is the corrected derivative.
-        final = json.loads(log.ai_result_json)
-        final_dets = final["detections"]
+        # 4. Apply fixes on top of the current result (incremental — earlier fixes
+        #    remain in effect). ai_result_json stays immutable.
+        next_item_id = max((d.get("itemId") or 0) for d in final_dets)
         for fi in request.fixItems:
+            if fi.fixType == "add":
+                # Manually added entry: model-output fields don't exist — nulls +
+                # source marker keep the data honest (no fake confidence values;
+                # fine-tuning pipelines can filter on source)
+                new_sku_id = fi.skuId or ""
+                sku_name = await asyncio.to_thread(indexer.get_sku_name, new_sku_id) or new_sku_id
+                next_item_id += 1
+                final_dets.append({
+                    "itemId": next_item_id,
+                    "bbox": list(fi.roiRect or []),
+                    "classId": None,
+                    "className": None,
+                    "detectionConf": None,
+                    "skuId": new_sku_id,
+                    "skuName": sku_name,
+                    "matchScore": None,
+                    "skuDistribution": None,
+                    "matchedVectorTags": None,
+                    "source": "manual",
+                })
+                continue
             det = next((d for d in final_dets if d.get("itemId") == fi.itemId), None)
             if det is None:
                 return error_response(
@@ -335,9 +373,16 @@ async def fix(
                 counts[sid] = counts.get(sid, 0) + 1
         final["counts"] = counts
 
-        # 5b. Diff metrics: final vs original (recomputed on every fix — latest-wins)
+        # 5b. Diff metrics: current final vs original (cumulative across all fixes).
+        #     Added = fix-added entries still present (source="manual" — every add
+        #     is stamped at creation and history was backfilled); removed = original
+        #     entries no longer present. itemId-reuse after removal (add reuses a
+        #     freed max id) is handled: the reused id counts as added via its
+        #     manual source, and the original entry it shadows counts as removed.
         original_by_id = {d.get("itemId"): d for d in detections}
-        detection_diff = len(final_dets) - len(detections)
+        detections_added = sum(1 for d in final_dets if d.get("source") == "manual")
+        survivors = len(final_dets) - detections_added
+        detections_removed = max(0, len(detections) - survivors)
         sku_mismatch_count = sum(
             1
             for d in final_dets
@@ -345,12 +390,21 @@ async def fix(
             and original_by_id[d["itemId"]].get("skuId") != d.get("skuId")
         )
 
-        # 6. Persist — latest-wins: final result is always recomputed from the original
-        log.user_correction_json = json.dumps([fi.model_dump() for fi in request.fixItems])
+        # 6. Persist — fixes accumulate: userCorrection keeps every submitted item
+        #    in submission order (full audit trail across fixes)
+        try:
+            corrections = json.loads(log.user_correction_json) if log.user_correction_json else []
+        except json.JSONDecodeError:
+            corrections = []
+        if not isinstance(corrections, list):
+            corrections = []
+        corrections.extend(fi.model_dump() for fi in request.fixItems)
+        log.user_correction_json = json.dumps(corrections)
         log.final_result_json = json.dumps(final)
         log.correction_status = "corrected"
         log.correction_count = (log.correction_count or 0) + 1
-        log.detection_diff = detection_diff
+        log.detections_added = detections_added
+        log.detections_removed = detections_removed
         log.sku_mismatch_count = sku_mismatch_count
         log.corrected_at = datetime.now()
 

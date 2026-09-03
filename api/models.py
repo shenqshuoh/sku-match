@@ -64,8 +64,11 @@ class RecognitionLog(Base):
     original_visual_image_path: Mapped[str | None] = mapped_column(String, nullable=True)
     # URL/path of the unannotated input image (CDN when upload succeeded, else local).
     input_image_path: Mapped[str | None] = mapped_column(String, nullable=True)
-    # Fix-vs-original metrics (final vs ai_result_json), recomputed on each fix
-    detection_diff: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Fix-vs-original metrics (final vs ai_result_json), recomputed on each fix.
+    # Added = fix-added detections still present (source="manual"); removed =
+    # original detections no longer present. Both are absolute (unsigned) counts.
+    detections_added: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    detections_removed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     sku_mismatch_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
 

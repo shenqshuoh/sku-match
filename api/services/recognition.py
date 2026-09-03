@@ -256,6 +256,7 @@ class RecognitionService:
                 "matchConcentration": match_concentration,
                 "skuDistribution": top_distribution,
                 "matchedVectorTags": matched_vector_tags,
+                "source": "model",
             })
 
         annotated_path = self.image_storage.get_result_path(task_id)

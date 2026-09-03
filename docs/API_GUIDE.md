@@ -113,7 +113,7 @@ curl -X POST http://localhost:8000/api/v1/recognition/detect \
 |--------|------|-------------|
 | `GET` | `/health` | Health check (public) |
 | `POST` | `/api/v1/recognition/detect` | Detect & match SKUs in an image |
-| `POST` | `/api/v1/recognition/fix` | Submit correction for a detection (reassign / remove / adjust-roi) |
+| `POST` | `/api/v1/recognition/fix` | Submit correction for a detection (reassign / remove / adjust-roi / add) |
 | `POST` | `/api/v1/goods/sku/new` | Create SKU + start embedding |
 | `POST` | `/api/v1/goods/sku/update` | Update SKU name |
 | `POST` | `/api/v1/goods/sku/delete` | Delete SKU + index data |
@@ -176,6 +176,7 @@ Detect beverage containers in an image and match each against the indexed SKU ca
 | `matchConcentration` | float | **Deprecated** — redundant with `matchScore`. Still returned for backwards compat; will be removed in a future version. |
 | `skuDistribution` | object \| null | Top N candidates as `{skuId: {skuName, score}}`, sorted descending. N is configurable via `DISTRIBUTION_TOP_K` (default 10). Empty `{}` if below threshold. The actual number returned may be fewer than N: when patch re-ranking is enabled, the distribution is built from the `RERANK_TOP_K` candidate pool (default 50 vectors), so the number of unique SKUs depends on vectors-per-SKU (e.g., 50 vectors ÷ ~10 images/SKU ≈ 5 SKUs). Increase `RERANK_TOP_K` to surface more candidates. |
 | `matchedVectorTags` | array \| null | Up to 20 reference vectors: `[{skuId, score, mediaUrl}]`. Empty `[]` if below threshold. |
+| `source` | string | Entry origin: `"model"` (auto-detected) or `"manual"` (added via fix `add`). Manual entries carry `null` for all model-output fields above. Entries in logs created before this flag existed were backfilled to `"model"`. |
 
 **Example response:**
 
@@ -226,7 +227,7 @@ Detect beverage containers in an image and match each against the indexed SKU ca
 
 Submit human corrections for a previous detection. Corrections are applied to a **corrected copy** of the result (`finalResult`); the original AI output (`aiResult`) is immutable and preserved for fine-tuning. It does not re-run detection.
 
-Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `correctionCount`, and stamps `correctedAt`. Re-submitting replaces previous corrections (**latest-wins**: `finalResult` is always recomputed from the original).
+Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `correctionCount`, and stamps `correctedAt`. Fixes are **incremental**: each submission is applied on top of the current `finalResult` — previous fixes are kept. `userCorrection` accumulates every submitted fix item in order (full audit trail).
 
 **Request:**
 
@@ -239,16 +240,17 @@ Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `c
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `fixType` | `"reassign"` \| `"remove"` \| `"adjust-roi"` | yes | **Breaking change**: free-form values (e.g. `"misidentification"`) are now rejected (422). Use `"reassign"`. |
-| `itemId` | int | yes | Which detection item this correction applies to. Must exist in the original result (400 otherwise). |
-| `roiRect` | `number[4]` \| null | required for `adjust-roi` | Corrected bounding box `[x1, y1, x2, y2]` (exactly 4 elements). |
-| `skuId` | string \| null | required for `reassign` | Corrected SKU ID. Not validated against the live SKU table (historical corrections may reference deleted SKUs). |
+| `fixType` | `"reassign"` \| `"remove"` \| `"adjust-roi"` \| `"add"` | yes | **Breaking change**: free-form values (e.g. `"misidentification"`) are now rejected (422). Use `"reassign"`. |
+| `itemId` | int \| null | yes (except `add`) | Which detection item this correction applies to. Must exist in the **current** result (400 otherwise) — items removed by an earlier fix can no longer be referenced. Ignored for `add`. |
+| `roiRect` | `number[4]` \| null | required for `adjust-roi`, `add` | Corrected bounding box `[x1, y1, x2, y2]` (exactly 4 elements). For `add`: the manually drawn box of the new detection. |
+| `skuId` | string \| null | required for `reassign`, `add` | Corrected SKU ID. Not validated against the live SKU table (historical corrections may reference deleted SKUs). For `add`: the SKU assigned to the new detection. |
 
 **Fix semantics:**
 
 - `remove` — drops the detection from `finalResult` (reduces counts). The removed item remains traceable via `userCorrection` and is still present in `originalResult`.
 - `reassign` — replaces `skuId`/`skuName` in `finalResult`; counts are recomputed.
 - `adjust-roi` — replaces `bbox` in `finalResult`.
+- `add` — creates a **new, manually added detection** (model miss): gets the next free `itemId`, uses `roiRect` as its `bbox`, resolves `skuName` from the index. Model-output fields are `null` (`detectionConf`, `classId`, `className`, `matchScore`, `skuDistribution`, `matchedVectorTags`) and the entry carries `"source": "manual"` (model entries carry `"source": "model"`) — clients should null-check these fields; fine-tuning pipelines can filter on `source`.
 - `counts` in `finalResult` is always recomputed from the remaining detections.
 
 ```json
@@ -257,7 +259,8 @@ Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `c
   "fixItems": [
     {"fixType": "remove", "itemId": 2},
     {"fixType": "reassign", "itemId": 1, "skuId": "100003_ws"},
-    {"fixType": "adjust-roi", "itemId": 3, "roiRect": [10, 20, 30, 40]}
+    {"fixType": "adjust-roi", "itemId": 3, "roiRect": [10, 20, 30, 40]},
+    {"fixType": "add", "roiRect": [50, 60, 120, 300], "skuId": "100001_1664"}
   ]
 }
 ```
@@ -270,7 +273,7 @@ Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `c
 
 | HTTP | Condition |
 |------|-----------|
-| 400 | `itemId` not found in the original result, or the log has no valid AI result (failed detection) |
+| 400 | `itemId` not found in the current result (e.g. already removed by an earlier fix), or the log has no valid AI result (failed detection) |
 | 404 | Unknown `taskId` |
 | 500 | Internal error |
 
@@ -402,8 +405,9 @@ Add or delete media for an existing SKU.
 |-------|------|----------------|-------------------|-------|
 | `mediaId` | string \| null | no | yes | Which media to delete. |
 | `mediaUrl` | string \| null | yes | no | Image URL/path to embed (add action). |
+| `preCropped` | bool | no | — | Default `false`: server runs YOLOE crop + background masking. `true`: image is already a cropped reference — used as-is (EXIF-transposed), no detection step, so it cannot fail on "no detection". |
 
-**Add behavior:** Each image is downloaded, cropped via YOLOE, embedded, indexed in Chroma, and the processed crop is uploaded to Qiniu. The media row is inserted on success.
+**Add behavior:** Each image is downloaded, cropped via YOLOE (`preCropped: true` skips crop/mask and uses the image as-is), embedded, indexed in Chroma, and the processed crop is uploaded to Qiniu. The media row is inserted on success.
 
 **Delete behavior:** Removes the DB media row, Chroma vector, patch file, and color descriptor file for each `mediaId`.
 
@@ -442,10 +446,11 @@ Retrieve the AI result (corrected view if available), correction state, and huma
 | `correctionStatus` | string | `"pending"` / `"corrected"` / `"reviewed"`. |
 | `correctionCount` | int | Number of fix submissions. |
 | `correctedAt` | string \| null | Timestamp of the latest fix (ISO 8601). |
-| `detectionDiff` | int | Signed detection-count change of the latest fix vs the original. |
+| `detectionsAdded` | int | Fix-added detections still present in the current result vs the original. |
+| `detectionsRemoved` | int | Original detections no longer present in the current result. |
 | `skuMismatchCount` | int | Detections reassigned by the latest fix (vs original). |
 | `inputImageUrl` | string \| null | Unannotated input image URL (absolute). |
-| `userCorrection` | array \| null | Latest correction items submitted via `/recognition/fix` — including `remove` entries, so removed detections stay traceable. |
+| `userCorrection` | array \| null | All correction items submitted via `/recognition/fix`, accumulated in submission order — including `remove` entries, so removed detections stay traceable. |
 | `visualImageUrl` | string \| null | Final annotated image URL. **Always absolute** — CDN URL when uploaded, otherwise `http://<host>:<port>/results/annotated/...` derived from the request's base URL. |
 
 **Error responses:** 404 — unknown `taskId`.
@@ -483,7 +488,8 @@ Paginated recognition-log listing, filterable by time range and correction statu
 | `correctedAt` | string \| null | Timestamp of the latest fix. |
 | `correctionCount` | int | Fix submissions so far. |
 | `detectionCount` | int | Detections in the original result (0 for pre-migration / failed logs). |
-| `detectionDiff` | int | Signed detection-count change of the latest fix vs the original (`-2` = two removed). Recomputed on every fix (latest-wins). |
+| `detectionsAdded` | int | Fix-added detections still present in the current result vs the original. Cumulative across all fixes. |
+| `detectionsRemoved` | int | Original detections no longer present in the current result. Cumulative across all fixes. |
 | `skuMismatchCount` | int | Detections whose `skuId` differs between the latest fix and the original (reassignments). |
 | `inputImageUrl` | string \| null | Unannotated input image URL (absolute — CDN, or local `/results/inputs/...` expanded with the request host when the upload failed). |
 | `visualImageUrl` | string \| null | Final annotated image URL (absolute). |

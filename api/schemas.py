@@ -35,8 +35,8 @@ class DetectRequest(BaseModel):
 
 
 class FixItem(BaseModel):
-    fixType: Literal["reassign", "remove", "adjust-roi"]
-    itemId: int
+    fixType: Literal["reassign", "remove", "adjust-roi", "add"]
+    itemId: int | None = None  # not used by fixType "add" (new entry gets the next free id)
     roiRect: list[float] | None = None
     skuId: str | None = Field(default=None, max_length=128)
 
@@ -44,11 +44,13 @@ class FixItem(BaseModel):
     def validate_conditional_fields(self):
         if self.fixType == "reassign" and not (self.skuId or "").strip():
             raise ValueError("skuId is required when fixType is 'reassign'")
-        if self.fixType == "adjust-roi":
+        if self.fixType in ("adjust-roi", "add"):
             if self.roiRect is None:
-                raise ValueError("roiRect is required when fixType is 'adjust-roi'")
+                raise ValueError(f"roiRect is required when fixType is '{self.fixType}'")
             if len(self.roiRect) != 4:
                 raise ValueError("roiRect must have exactly 4 elements [x1, y1, x2, y2]")
+        if self.fixType == "add" and not (self.skuId or "").strip():
+            raise ValueError("skuId is required when fixType is 'add'")
         return self
 
 
@@ -117,6 +119,7 @@ class SKUEnableRequest(BaseModel):
 class MediaItem(BaseModel):
     mediaId: str | None = None
     mediaUrl: str | None = None
+    preCropped: bool = False  # add: image is already cropped — skip YOLOE crop/mask
 
 
 class SKUMediaRequest(BaseModel):
@@ -146,6 +149,7 @@ class DetectionItem(BaseModel):
     )
     skuDistribution: dict[str, SkuDistributionEntry] | None = None
     matchedVectorTags: list[dict[str, Any]] | None = None
+    source: str | None = None  # "model" (auto-detected) | "manual" (added via fix)
 
 
 class DetectData(BaseModel):
@@ -215,7 +219,8 @@ class LogListItem(BaseModel):
     correctedAt: datetime | None = None
     correctionCount: int = 0
     detectionCount: int = 0
-    detectionDiff: int = 0
+    detectionsAdded: int = 0
+    detectionsRemoved: int = 0
     skuMismatchCount: int = 0
     inputImageUrl: str | None = None
     visualImageUrl: str | None = None

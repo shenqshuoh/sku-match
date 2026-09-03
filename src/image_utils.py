@@ -117,13 +117,13 @@ def draw_annotations(
     for det in detections:
         x1, y1, x2, y2 = map(int, det["bbox"])
         sku_name = det.get("skuName", "unknown")
-        score = det.get("matchScore", 0.0)
+        score = det.get("matchScore")  # None on manually added detections (fix "add")
 
         # Bounding box (green)
         draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
 
-        # Label background
-        label = f"{sku_name} ({score:.2f})"
+        # Label background (score omitted for manual entries)
+        label = f"{sku_name} ({score:.2f})" if score is not None else sku_name
         text_bbox = draw.textbbox((x1, y1), label, font=font)
         text_h = text_bbox[3] - text_bbox[1]
         draw.rectangle(

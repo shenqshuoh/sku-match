@@ -20,9 +20,11 @@ async def process_single_media(
     processor,
     image_storage,
     inference_executor,
+    pre_cropped: bool = False,
 ) -> bool:
     """Download, embed, upload masked crop, and cleanup for a single media item.
 
+    pre_cropped=True skips YOLOE cropping — the image is embedded as-is.
     Returns True on success, False on failure (including download failure —
     callers rely on False to flag the media row as failed).
     """
@@ -38,6 +40,7 @@ async def process_single_media(
             media_id,
             local_path,
             {"media_url": media_url},
+            pre_cropped,
         )
         if result.success and result.crop_path:
             try:

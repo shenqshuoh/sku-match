@@ -309,6 +309,7 @@ async def manage_media(
             success = await process_single_media(
                 request.skuId, sku_name, media_id, item.mediaUrl,
                 processor, image_storage, inference_executor,
+                pre_cropped=item.preCropped,
             )
             if success:
                 media = SKUMedia(

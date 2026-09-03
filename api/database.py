@@ -38,7 +38,8 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "final_result_json": "TEXT",
         "original_visual_image_path": "VARCHAR",
         "input_image_path": "VARCHAR",
-        "detection_diff": "INTEGER NOT NULL DEFAULT 0",
+        "detections_added": "INTEGER NOT NULL DEFAULT 0",
+        "detections_removed": "INTEGER NOT NULL DEFAULT 0",
         "sku_mismatch_count": "INTEGER NOT NULL DEFAULT 0",
     },
     "sku_media": {

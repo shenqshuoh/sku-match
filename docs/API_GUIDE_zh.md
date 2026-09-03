@@ -1,163 +1,112 @@
-# API 接口文档
+# SKU Match API 指南
 
-## 1. Authentication & Rate Limiting
+Base URL http://<host>:8000，所有 endpoint 前缀 /api/v1。
 
-### API Key
+## 1. Authentication
+
+api/config.py: API_KEY 非空时，所有 /api/v1/* request 需带 header（为空时免认证，当前部署默认禁用）：
 
 ```bash
-curl -H "X-API-Key: your-secret-api-key-here" \
-     http://localhost:8000/api/v1/goods/sku/list
+curl -H "X-API-Key: <key>" http://localhost:8000/api/v1/goods/sku/list
 ```
-
-当 `API_KEY` 为空时无需 key 即可访问。
 
 ## 2. Response 格式
 
-**成功（HTTP 200）：**
+统一 envelope：
 
 ```json
-{"code": 1, "data": { ... }, "msg": "success"}
+{"code": 1, "data": {...}, "msg": "success"}
+{"code": 0, "data": null, "msg": "..."}
 ```
 
-**错误（HTTP 4xx/5xx）：**
+错误时 HTTP status code 与 code=0 同时返回：
 
-```json
-{"code": 0, "data": null, "msg": "skuId '...' not found"}
-```
+| HTTP | 场景                | msg 示例                                   |
+|----|-------------------|------------------------------------------|
+| 400  | 无效 request        | Unsupported action: '...'                  |
+| 404  | resource 不存在     | skuId '...' not found                      |
+| 409  | resource 重复       | taskId '...' already exists                |
+| 422  | validation error    | Pydantic 报错                              |
+| 500  | 内部错误            | Unexpected exception                       |
+| 503  | service unavailable | No SKUs indexed yet — add references first |
 
-HTTP status code 表示错误类型：
+> 例外：/goods/sku/media 部分图片失败返回 HTTP 200 + code=0，data.embeddingFailed 列出失败 URL（其余可能已成功），需人工处理。
 
-| HTTP Status | 含义 | msg 示例 |
-|---|---|---|
-| 400 | Request 无效 | `Unsupported action: '...'` |
-| 404 | Resource 不存在 | `skuId '...' not found` |
-| 409 | 冲突（resource 重复） | `taskId '...' already exists` |
-| 422 | Validation error（Pydantic） | Request body 格式错误 |
-| 500 | 服务器内部错误 | 未预期的异常 |
-| 503 | Service unavailable | `No SKUs indexed yet — add reference images first` |
+## 3. Endpoint 一览
 
-> 例外：`/goods/sku/media` 的部分失败返回 HTTP 200 + `code=0`， `data.embeddingFailed` 列出失败的 URL（部分图片可能已成功处理）。需要人工检查图片考虑是否重新拍摄。
+| Method | Path                            | 说明                                                 |
+|------|-------------------------------|----------------------------------------------------|
+| GET    | /health                         | Health check                                         |
+| POST   | /api/v1/recognition/detect      | 识别饮料容器并匹配 SKU                               |
+| POST   | /api/v1/recognition/fix         | 提交人工纠错（reassign / remove / adjust-roi / add） |
+| POST   | /api/v1/goods/sku/new           | 创建 SKU 并启动 embedding 任务                       |
+| POST   | /api/v1/goods/sku/update        | 更新 skuName                                         |
+| POST   | /api/v1/goods/sku/delete        | 删除 SKU                                             |
+| POST   | /api/v1/goods/sku/enable        | 启用 / 禁用 SKU                                      |
+| GET    | /api/v1/goods/sku/list          | 分页查询 SKU 列表                                    |
+| POST   | /api/v1/goods/sku/media         | 添加 / 删除 SKU media                                |
+| GET    | /api/v1/logs/recognition/get    | 查询单条 recognition log                             |
+| GET    | /api/v1/logs/recognition/list   | 分页查询 recognition log                             |
+| POST   | /api/v1/logs/recognition/status | 设置纠错状态                                         |
+| POST   | /api/v1/logs/recognition/delete | 批量删除 recognition log                             |
+| GET    | /api/v1/system/train-status/get | 查询 embedding 任务状态                              |
 
-## 3. 查询/新增/检测
+## 4. Recognition
 
-### 查询 SKU 列表
+### POST /api/v1/recognition/detect
 
-```bash
-curl "http://localhost:8000/api/v1/goods/sku/list?page=1&size=20"
-# {"code":1,"data":{"list":[],"page":1,"pageSize":20,"total":0},"msg":"success"}
-```
-
-可选 `keyword` query parameter，按 `skuId` 和 `skuName` 模糊搜索（不区分大小写）：
-
-```bash
-curl "http://localhost:8000/api/v1/goods/sku/list?page=1&size=20&keyword=cola"
-```
-
-### 新增 SKU
-
-```bash
-curl -X POST http://localhost:8000/api/v1/goods/sku/new \
-  -H "Content-Type: application/json" \
-  -d '{
-    "skuId": "test-cola-001",
-    "skuName": "Coca-Cola 330ml Can",
-    "files": ["https://example.com/cola-front.jpg", "https://example.com/cola-side.jpg"],
-    "trainJobId": "job-001"
-  }'
-```
-
-上传后触发 Embedding，异步执行。`/system/train-status/get` 查询完成状态。
-
-### 图片检测识别
-
-```bash
-curl -X POST http://localhost:8000/api/v1/recognition/detect \
-  -H "Content-Type: application/json" \
-  -d '{
-    "taskId": "task-001",
-    "mode": "IMAGE",
-    "files": "https://example.com/fridge-photo.jpg"
-  }'
-```
-
-## 4. Endpoint
-
-| Method | Path | 说明 |
-|--------|------|------|
-| `GET` | `/health` | |
-| `POST` | `/api/v1/recognition/detect` | 检测图片中的饮料容器并匹配 SKU |
-| `POST` | `/api/v1/recognition/fix` | 提交检测结果的人工 correction（reassign / remove / adjust-roi） |
-| `POST` | `/api/v1/goods/sku/new` | 创建 SKU 并启动 embedding 任务 |
-| `POST` | `/api/v1/goods/sku/update` | 更新 SKU 名称 |
-| `POST` | `/api/v1/goods/sku/delete` | 删除 SKU 及 index 数据 |
-| `POST` | `/api/v1/goods/sku/enable` | 启用/禁用 SKU |
-| `GET` | `/api/v1/goods/sku/list` | 分页查询 SKU 列表（支持关键词搜索） |
-| `POST` | `/api/v1/goods/sku/media` | 添加/删除 SKU media |
-| `GET` | `/api/v1/logs/recognition/get` | 查询 recognition log（有效结果 + 可选原始结果） |
-| `GET` | `/api/v1/logs/recognition/list` | 分页查询 recognition log（时间 / correction status 过滤） |
-| `POST` | `/api/v1/logs/recognition/status` | 手动设置 correction status |
-| `POST` | `/api/v1/logs/recognition/delete` | 批量删除 recognition log |
-| `GET` | `/api/v1/system/train-status/get` | 查询 embedding 任务状态 |
-
----
-
-## 5. Recognition
-
-### POST `/api/v1/recognition/detect`
-
-检测图片中的饮料与 SKU 库进行匹配。
+识别图中饮料容器并与 SKU index 匹配。
 
 **Request：**
 
-| Field | Type | Required | Default | 说明 |
-|-------|------|----------|---------|------|
-| `taskId` | string | yes | — | 拒绝重复的 taskId（409） |
-| `mode` | `"IMAGE"` \| `"VIDEO"` | no | `"IMAGE"` | `VIDEO` 当前不可用 |
-| `files` | string | yes | — | 单张图片的 URL 或本地路径。 |
-| `roiRect` | `number[4]` | no | `null` | Region of interest `[x1, y1, x2, y2]`。忽略中心点落在区域外的检测目标 |
+| Field   | Type               | Required | Default | 说明                                             |
+|-------|------------------|--------|-------|------------------------------------------------|
+| taskId  | string             | yes      | —       | 重复提交返回 409                                 |
+| mode    | "IMAGE" \| "VIDEO" | no       | "IMAGE" | VIDEO 当前不可用                                 |
+| files   | string             | yes      | —       | 单张图片 URL 或本地路径                          |
+| roiRect | number[4] \| null  | no       | null    | [x1, y1, x2, y2]，忽略中心点落在区域外的检测目标 |
 
 ```json
 {
   "taskId": "task-001",
-  "mode": "IMAGE",
   "files": "https://example.com/fridge-photo.jpg",
   "roiRect": [0, 0, 1920, 1080]
 }
 ```
 
-**Response `data`（`DetectData`）：**
+**Response data：**
 
-| Field | Type | 说明 |
-|-------|------|------|
-| `taskId` | string | |
-| `matchedImage` | string | 检测结果图片链接。七牛云上传失败时为本地 `/results/` 路径，附带 `qiniuUploadFailed: true`。 |
-| `counts` | `object` | skuId → 数量 |
-| `detections` | `array` | 检测目标详情 |
+| Field        | Type   | 说明                                                                       |
+|------------|------|--------------------------------------------------------------------------|
+| taskId       | string |                                                                            |
+| matchedImage | string | Annotated image URL；Qiniu 上传失败时为本地 URL 且 qiniuUploadFailed: true |
+| counts       | object | skuId → 数量                                                               |
+| detections   | array  | 检测目标列表（见下）                                                       |
 
-**Detection item（`DetectionItem`）field：**
+**检测目标字段：**
 
-| Field | Type | 说明 |
-|-------|------|------|
-| `itemId` | int | 从 1 开始 |
-| `bbox` | `number[4]` | Bounding box `[x1, y1, x2, y2]`，饮料像素坐标。 |
-| `classId` | int | YOLOE class ID。 |
-| `className` | string | YOLOE 内部 Class label（bottle/canned/...），可无视 |
-| `detectionConf` | float | YOLOE detection
-confidence（0–1），系统判定物品为饮料的置信度 |
-| `skuId` | string | 匹配的 SKU ID。低于 `MATCH_CONF` threshold 时为空 |
-| `skuName` | string | 匹配的 SKU 名称。低于 threshold 时为空 |
-| `matchScore` | float | Match confidence（softmax 概率，0–1）。低于 threshold 时为 `0.0`。 |
-| `skuDistribution` | object \| null | 匹配SKU至多前N名，格式为 `{skuId: {skuName, score}}`，按概率降序排列。N 通过 `DISTRIBUTION_TOP_K` 配置（默认 10）。具体数量受搜索策略和各SKU参考图片数量影响，当前配置下通常显示前5。实测中如果不够需要更改测试更大的搜索策略 |
-| `matchedVectorTags` | array \| null | 最多 20 条 reference vector：`[{skuId, score, mediaUrl}]`，调试用，可无视 |
+| Field             | Type           | 说明                                                                                                                                                         |
+|-----------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| itemId            | int            | 序号，从 1 开始                                                                                                                                              |
+| bbox              | number[4]      | [x1, y1, x2, y2] 像素坐标                                                                                                                                    |
+| classId           | int            | YOLOE class ID                                                                                                                                               |
+| className         | string         | YOLOE class label（bottle / canned / …），业务可忽略                                                                                                         |
+| detectionConf     | float          | YOLOE detection confidence（0–1）                                                                                                                            |
+| skuId             | string         | 匹配结果；低于 MATCH_CONF threshold 时为空                                                                                                                   |
+| skuName           | string         | 同上                                                                                                                                                         |
+| matchScore        | float          | Match confidence（softmax，0–1）；低于 threshold 时为 0.0                                                                                                    |
+| skuDistribution   | object \| null | Top-N {skuId: {skuName, score}}，按 score 降序；N 由 DISTRIBUTION_TOP_K（默认 10）控制，实际条数受 RERANK_TOP_K 搜索池限制（当前约 5）                       |
+| matchedVectorTags | array \| null  | 调试用的 reference vector 列表，可忽略                                                                                                                       |
+| source            | string \| null | 检测目标来源："model"（模型自动检测）或 "manual"（经 fix add 人工新增）。人工条目的上述模型输出字段均为 null。该字段上线前创建的历史日志已统一回填为 "model" |
 
-**Response**
+**Response 示例：**
 
 ```json
 {
   "code": 1,
   "data": {
     "taskId": "task-001",
-    "matchedImage": "https://vr.jihaihotpot.com/sku-match/2026-08/12/task-001.jpg",
+    "matchedImage": "http://110.76.42.124:8000/results/annotated/task-001_annotated.jpg",
     "counts": {"100001_1664": 2},
     "detections": [
       {
@@ -169,11 +118,9 @@ confidence（0–1），系统判定物品为饮料的置信度 |
         "skuId": "100001_1664",
         "skuName": "1664",
         "matchScore": 0.87,
-        "matchConcentration": 0.73,
         "skuDistribution": {
           "100001_1664": {"skuName": "1664", "score": 0.87},
-          "100003_ws": {"skuName": "乌苏", "score": 0.08},
-          "100010_ywcm": {"skuName": "怡泉柠檬味", "score": 0.03}
+          "100003_ws": {"skuName": "乌苏", "score": 0.08}
         },
         "matchedVectorTags": [
           {"skuId": "100001_1664", "score": 0.891234, "mediaUrl": "https://..."}
@@ -185,44 +132,29 @@ confidence（0–1），系统判定物品为饮料的置信度 |
 }
 ```
 
-**Error response：**
+**错误：** 409 taskId 重复；503 index 为空；500 其他异常。
 
-| HTTP | 触发条件 |
-|------|----------|
-| 409 | `taskId` 重复 |
-| 503 | Index 为空（尚无 SKU） |
-| 500 | 其他异常 |
+### POST /api/v1/recognition/fix
 
----
-
-### POST `/api/v1/recognition/fix`
-
-对检测结果人工纠错。Correction 会应用到一份**修正副本**（`finalResult`）上；原始 AI 输出（`originalResult`）不可变，永久保留（可用于后续 fine-tuning）。不会重新执行 detection。
-
-提交 fix 后，log 的 `correctionStatus` 自动置为 `corrected`，`correctionCount` 加一，`correctedAt` 记录时间戳。重复提交为 **latest-wins**：`finalResult` 总是从原始结果重新计算。
+对识别结果人工纠错，不重新执行识别。纠错应用在修正副本 finalResult 上；原始输出 originalResult 不可变（fine-tuning 数据）。fix 为**增量累积**：每次提交应用在当前 finalResult 上，之前的纠错保留；userCorrection 按提交顺序累积全部纠错记录。提交成功后 correctionStatus 为 corrected，correctionCount 加一。
 
 **Request：**
 
-| Field | Type | Required | 说明 |
-|-------|------|----------|------|
-| `taskId` | string | yes | 已存在的检测任务 |
-| `fixItems` | array（min 1） | yes | 纠错列表。 |
+| Field    | Type           | Required | 说明             |
+|--------|--------------|--------|----------------|
+| taskId   | string         | yes      | 已存在的识别任务 |
+| fixItems | array（min 1） | yes      | 纠错列表（见下） |
 
-**`FixItem`：**
+**FixItem：**
 
-| Field | Type | Required | 说明 |
-|-------|------|----------|------|
-| `fixType` | `"reassign"` \| `"remove"` \| `"adjust-roi"` | yes | **Breaking change**：不再接受自定义值（如 `"misidentification"`，会被 422 拒绝），请改用 `"reassign"`。 |
-| `itemId` | int | yes | 针对的 detection item 序号，必须存在于原始结果中（否则 400）。 |
-| `roiRect` | `number[4]` \| null | `adjust-roi` 时必填 | 纠错后的 bounding box `[x1, y1, x2, y2]`（恰好 4 个元素）。 |
-| `skuId` | string \| null | `reassign` 时必填 | 纠错后的 SKU ID。不校验是否存在于当前 SKU 表（历史纠错可能引用已删除的 SKU）。 |
+| Field   | Type                                            | Required              | 说明                                                                                 |
+|-------|-----------------------------------------------|---------------------|------------------------------------------------------------------------------------|
+| fixType | "reassign" \| "remove" \| "adjust-roi" \| "add" | yes                   | **Breaking**：不再接受自定义值（如 "misidentification"，422 拒绝），用 reassign 代替 |
+| itemId  | int \| null                                     | 除 add 外必填         | 必须存在于当前结果中（否则 400；已被 remove 的 item 不可再引用）；add 忽略该字段     |
+| roiRect | number[4] \| null                               | adjust-roi / add 必填 | 修正后的 bbox；add 时为手动框选的新检测目标 bbox                                     |
+| skuId   | string \| null                                  | reassign / add 必填   | 修正后的 skuId（允许引用已删除的 SKU）；add 时为新检测目标指定的 SKU                 |
 
-**Fix 语义：**
-
-- `remove` — 从 `finalResult` 中移除该 detection（counts 相应减少）。被移除的 item 仍可通过 `userCorrection` 追溯，且完整保留在 `originalResult` 中。
-- `reassign` — 替换 `finalResult` 中的 `skuId`/`skuName`，counts 重新计算。
-- `adjust-roi` — 替换 `finalResult` 中的 `bbox`。
-- `finalResult` 的 `counts` 总是基于剩余 detection 重新计算。
+remove 移除该检测目标（可经 userCorrection 追溯）；reassign 替换 skuId/skuName；adjust-roi 替换 bbox；add 新增人工检测目标（补漏）：分配下一个空闲 itemId，模型输出字段（detectionConf / classId / className / matchScore / skuDistribution / matchedVectorTags）均为 null，并携带 source: "manual" 标记（模型条目为 source: "model"）—— 客户端需对这些字段做 null 判断，fine-tuning 可按 source 过滤。
 
 ```json
 {
@@ -235,308 +167,166 @@ confidence（0–1），系统判定物品为饮料的置信度 |
 }
 ```
 
-**Annotated image 重新生成与 pre-fix 快照：** 每次 fix 后会基于修正结果重新生成 annotated image（best-effort —— JSON 结果始终是权威数据）。**首次** fix 时，同时会把 fix 前的标注图快照上传到独立的七牛 key；`originalImageUrl`（随 `includeOriginal=true` 返回）始终展示 fix 前的图。重新生成的图**每次 fix 上传到新的版本化 key**（`{taskId}_annotated_v2.jpg`、`_v3`…… —— upload token 为 insert-only，不允许覆盖同 key），因此 **`matchedImage` / `visualImageUrl` 每次 fix 都会变化** —— 请始终从 fix 响应、`GET /logs/recognition/get` 或 list 接口读取最新 URL，客户端不要缓存。detect 时会把源图持久化到本地（`inputs/`，保留 72 小时）用于重新生成；若已被清理则回退重新下载请求源图，再失败则保留旧图。
+**Annotated image 重新生成：** 每次 fix 后基于 finalResult 重新生成并上传到新的 versioned key（{taskId}_annotated_v2.jpg、_v3…，token 为 insert-only 不可覆盖），matchedImage / visualImageUrl 每次 fix 都变化 —— 始终从 fix response 或 log 接口读取最新 URL，客户端不要缓存。首次 fix 时同时保留 originalImageUrl。源图在 detect 时持久化到 inputs/（72 小时），过期则回退重新下载源图。
 
-**Response：** `data = {"matchedImage": "<url>"}` —— 重新生成的 annotated image URL（新的版本化 CDN URL；上传失败时为含 host 的完整本地 URL）。若跳过重新生成（如输入图不可用），`data` 为 `{}`。
+**Response：** data = {"matchedImage": "<url>"}（绝对 URL）；跳过重新生成时为 {}。
 
-**Error response：**
+**错误：** 404 taskId 不存在；400 itemId 不存在于当前结果（如已被之前的 fix 移除）或 log 无有效 AI 结果；500 内部错误。
 
-| HTTP | 触发条件 |
-|------|----------|
-| 400 | `itemId` 在原始结果中不存在，或该 log 无有效 AI 结果（detection 失败） |
-| 404 | `taskId` 不存在 |
-| 500 | 内部错误 |
+## 5. Goods（SKU Management）
 
----
+### POST /api/v1/goods/sku/new
 
-## 6. Goods（SKU Management）
-
-### POST `/api/v1/goods/sku/new`
-
-创建 SKU 记录、插入 media 行，并启动 async embedding 任务。
+创建 SKU 并启动 async embedding 任务（状态经 /system/train-status/get 查询）。
 
 **Request：**
 
-| Field | Type | Required | 说明 |
-|-------|------|----------|------|
-| `skuId` | string | yes | **纯 bare** 标识（max 128）—— 不带数字前缀。服务器会自动追加递增编号（`100001_`、`100002_`……）：当前最大为 `100106_x` 时提交 `kkkl` 会创建 `100107_kkkl`。提交的字符串原样作为后缀（不做任何改动）。**请从 response 中读取最终 skuId** —— 不要假设与你提交的一致。重复保护：suffix 相同**且**名称也相同 → 409；suffix 相同但名称不同则允许创建。 |
-| `skuName` | string | yes | 显示名称（max 256）。 |
-| `files` | string[] | yes | Reference 图片 URL/路径列表（1–50 条，非空字符串）。 |
-| `trainJobId` | string | yes | 唯一 job ID，用于 tracking（max 128）。 |
+| Field      | Type     | Required | 说明                                 |
+|----------|--------|--------|------------------------------------|
+| skuId      | string   | yes      | Bare id（见下）                      |
+| skuName    | string   | yes      | 显示名称                             |
+| files      | string[] | yes      | Reference 图片 URL / 路径（1–50 条） |
+| trainJobId | string   | yes      | 唯一 job ID                          |
 
-**Response：** `data = {"skuId": "...", "trainJobId": "..."}`
+**skuId 自动编号：**
 
-**Error response：**
+- 提交 bare id（拼音缩写，不含数字前缀），自动加递增前缀：当前最大 100106_x 时提交 kkkl → 100107_kkkl。提交串原样作为 suffix，不做清洗。
+- 重复判定：缩写相同**且** skuName 相同 → 409；skuName 不同 → 允许创建。
 
-| HTTP | 触发条件 |
-|------|----------|
-| 409 | `skuId` 或 `trainJobId` 重复 |
+**Response：** data = {"skuId": "...", "trainJobId": "..."}
 
----
+**错误：** 409 skuId 或 trainJobId 重复。
 
-### POST `/api/v1/goods/sku/update`
+### POST /api/v1/goods/sku/update
 
-更新 SKU 显示名称（同步更新 database 和 Chroma index metadata）。
+更新 skuName（同步 database 与 Chroma metadata）。
 
-**Request：**
+**Request：** {"skuId": "...", "skuName": "..."} → data 为 {}。**错误：** 404 skuId 不存在。
 
-| Field | Type | Required |
-|-------|------|----------|
-| `skuId` | string | yes |
-| `skuName` | string | yes |
+### POST /api/v1/goods/sku/delete
 
-**Response：** `data` 为空对象 `{}`。
+删除 SKU 并清理 media 行、Chroma vector、patch / color 文件。
 
-**Error response：** 404 — `skuId` 不存在。
+**Request：** {"skuId": "..."} → data 为 {}。**错误：** 404 skuId 不存在。
 
----
+### POST /api/v1/goods/sku/enable
 
-### POST `/api/v1/goods/sku/delete`
+禁用的 SKU 不参与匹配。
 
-删除 SKU 并 cascade 清理所有关联数据：database media 行、Chroma vector、patch 文件、color descriptor 文件。
+**Request：** {"skuId": "...", "enabled": true} → data 为 {}。**错误：** 404 skuId 不存在。
 
-**Request：** `{"skuId": "..."}`
-
-**Response：** `data` 为空对象 `{}`。
-
-**Error response：** 404 — `skuId` 不存在。
-
----
-
-### POST `/api/v1/goods/sku/enable`
-
-启用或禁用 SKU。被禁用的 SKU 不参与 matching query。
-
-**Request：**
-
-| Field | Type | Required | 说明 |
-|-------|------|----------|------|
-| `skuId` | string | yes | |
-| `enabled` | boolean | yes | `true` 启用，`false` 禁用。 |
-
-**Response：** `data` 为空对象 `{}`。
-
-**Error response：** 404 — `skuId` 不存在。
-
----
-
-### GET `/api/v1/goods/sku/list`
-
-分页查询 SKU 列表，支持关键词搜索。
+### GET /api/v1/goods/sku/list
 
 **Query parameter：**
 
-| Param | Type | Default | 说明 |
-|------|------|--------|------|
-| `page` | int | 1 | 页码（从 1 开始）。 |
-| `size` | int | 20 | 每页条数。 |
-| `keyword` | string | — | 按 `skuId` 和 `skuName` 模糊搜索（ILIKE，不区分大小写）。 |
-| `trainStatus` | string | — | 过滤：`"pending"` / `"indexing"` / `"completed"` / `"failed"`。非法值返回 400。 |
-| `enabled` | bool | — | 过滤：`true` / `false`。不传则返回全部。 |
+| Param       | Type   | Default | 说明                                                |
+|-----------|------|-------|---------------------------------------------------|
+| page        | int    | 1       | 页码（从 1 开始）                                   |
+| size        | int    | 20      | 每页条数                                            |
+| keyword     | string | —       | 按 skuId / skuName 模糊搜索（不区分大小写）         |
+| trainStatus | string | —       | pending / indexing / completed / failed，非法值 400 |
+| enabled     | bool   | —       | true / false，不传返回全部                          |
 
-**Response `data`：**
+**Response data：** {list, page, pageSize, total}，其中 list item：
 
-| Field | Type | 说明 |
-|-------|------|------|
-| `list` | array | SKU 列表（详见下文）。 |
-| `page` | int | 当前页码。 |
-| `pageSize` | int | 每页条数。 |
-| `total` | int | 符合条件的 SKU 总数。 |
+| Field       | Type   | 说明                                                                                        |
+|-----------|------|-------------------------------------------------------------------------------------------|
+| skuId       | string | 含数字前缀的完整 id                                                                         |
+| skuName     | string |                                                                                             |
+| trainStatus | string | pending → indexing → completed（异常 failed）                                               |
+| medias      | array  | [{mediaId, mediaType, mediaUrl, failed}]；failed: true 表示该图未产出 embedding，需人工处理 |
 
-**每条 SKU list item：**
-
-| Field | Type | 说明 |
-|-------|------|------|
-| `id` | int | Database 行 ID。 |
-| `skuId` | string | SKU 标识。 |
-| `skuName` | string | 显示名称。 |
-| `trainStatus` | string | Embedding 状态（见下方取值）。 |
-| `medias` | array | `[{mediaId, mediaType, mediaUrl, failed}]` — `mediaUrl` 会展开为完整 URL；`failed: true` 表示该 reference 图未产出 crop/embedding（需人工干预 —— 在列表中可见、可删除、可重新添加）。 |
-
-**`trainStatus`:** `"pending"` → `"indexing"` → `"completed"`（异常时为 `"failed"`）。
-
----
-
-### POST `/api/v1/goods/sku/media`
-
-为已有 SKU 添加或删除 media。
+### POST /api/v1/goods/sku/media
 
 **Request：**
 
-| Field | Type | Required | 说明 |
-|-------|------|----------|------|
-| `skuId` | string | yes | |
-| `action` | `"add"` \| `"delete"` | yes | |
-| `media` | array | yes | Media item 列表（详见下文）。 |
+| Field  | Type              | Required | 说明            |
+|------|-----------------|--------|---------------|
+| skuId  | string            | yes      |                 |
+| action | "add" \| "delete" | yes      |                 |
+| media  | array             | yes      | Media item 列表 |
 
-**Media item（`MediaItem`）：**
+**Media item：** add 需 mediaUrl（要 embed 的图片），delete 需 mediaId；另有可选字段 preCropped（默认 false）：
 
-| Field | Type | add 时必填 | delete 时必填 | 说明 |
-|-------|------|------------|------------|------|
-| `mediaId` | string \| null | no | yes | 要删除的 media ID。 |
-| `mediaUrl` | string \| null | yes | no | 要 embed 的图片 URL/路径（add 操作）。 |
+| Field      | Type | 说明                                                                                                                                            |
+|----------|----|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| preCropped | bool | 默认 false：server 执行 YOLOE crop + 背景遮罩。true：图片已是裁好的 reference，原样使用（仅 EXIF 校正），跳过检测环节，不会因“未检测到目标”失败 |
 
-**Add 行为：** 每张图片依次 download → YOLOE crop → embedding → 写入 Chroma index → 上传到七牛。成功后插入 media 行
+**行为：** add 依次执行 download → YOLOE crop → embedding → 写入 Chroma → 上传 Qiniu（preCropped: true 跳过 crop / mask 环节）；delete 清理 media 行、vector、patch / color 文件。
 
-**Delete 行为：** 删除 database media 行、Chroma vector、patch 文件、color descriptor 文件。
+**Response：** data 为 {}。**错误：** 400 参数缺失或 action 非法；404 skuId 不存在；部分图片 embedding 失败返回 200 + code=0，data.embeddingFailed 列出失败 URL。
 
-**Response：** 成功时 `data` 为空对象 `{}`。
+## 6. Log
 
-**Error response：**
+### GET /api/v1/logs/recognition/get
 
-| HTTP | 触发条件 |
-|------|----------|
-| 400 | 缺少 `mediaUrl`（add），或 `action` 不支持 |
-| 404 | `skuId` 不存在（add） |
-| 200 + `code=0` | 部分图片 embedding 失败 — `data.embeddingFailed` 列出失败的 URL |
+**Query parameter：** taskId（必填）；includeOriginal=true 时额外返回 originalResult / originalImageUrl。
 
----
+**Response data：**
 
-## 7. Log
+| Field             | Type           | 说明                                                                  |
+|-----------------|--------------|---------------------------------------------------------------------|
+| aiResult          | object \| null | **有效结果**：有 fix 时为 finalResult（修正视图），否则为原始 AI 输出 |
+| originalResult    | object \| null | 不可变原始输出，仅 includeOriginal=true 时返回                        |
+| originalImageUrl  | string \| null | Pre-fix annotated image URL，仅 includeOriginal=true 时返回           |
+| correctionStatus  | string         | pending / corrected / reviewed                                        |
+| correctionCount   | int            | fix 提交次数                                                          |
+| correctedAt       | string \| null | 最近一次 fix 时间（ISO 8601）                                         |
+| detectionsAdded   | int            | 当前结果相对原始结果新增的检测目标数量（fix 手工添加且仍存在）        |
+| detectionsRemoved | int            | 原始结果中已被移除、不再存在于当前结果的检测目标数量                  |
+| skuMismatchCount  | int            | 最新 fix 中被 reassign 的数量                                         |
+| inputImageUrl     | string \| null | 未标注输入原图 URL（绝对 URL）                                        |
+| userCorrection    | array \| null  | 历次提交的 fixItems 按顺序累积（含 remove 记录，完整审计）            |
+| visualImageUrl    | string \| null | 最终 annotated image URL（始终为绝对 URL，本地 fallback 时含 host）   |
 
-### GET `/api/v1/logs/recognition/get`
+**错误：** 404 taskId 不存在。
 
-查询某次 detection task 的 AI 结果（有纠错时为修正视图）、correction 状态和人工纠错内容。
+### GET /api/v1/logs/recognition/list
+
+按 createdAt 降序分页。
 
 **Query parameter：**
 
-| Param | Type | Default | 说明 |
-|-------|------|---------|------|
-| `taskId` | string | —（必填） | |
-| `includeOriginal` | bool | `false` | 同时返回 `originalResult`（不可变的原始 AI 输出，fine-tuning 数据）。 |
+| Param            | Type   | Default | 说明                             |
+|----------------|------|-------|--------------------------------|
+| page / size      | int    | 1 / 20  | 分页                             |
+| startTime        | string | —       | ISO 8601，createdAt >= startTime |
+| endTime          | string | —       | ISO 8601，createdAt <= endTime   |
+| correctionStatus | string | —       | pending / corrected / reviewed   |
 
-**Response `data`：**
+**Response data：** {list, page, pageSize, total}，list item 为 taskId、createdAt、correctionStatus、correctedAt、correctionCount、detectionCount、detectionsAdded、detectionsRemoved、skuMismatchCount、inputImageUrl、visualImageUrl（含义同上）。
 
-| Field | Type | 说明 |
-|-------|------|------|
-| `aiResult` | object \| null | **有效结果**：提交过 fix 时为 `finalResult`（修正视图），否则为原始 AI 输出。字段名与原来一致，客户端无需修改。 |
-| `originalResult` | object \| null | 不可变的原始 AI 输出。仅 `includeOriginal=true` 时返回。 |
-| `originalImageUrl` | string \| null | fix 前的标注图（CDN URL 或本地路径）。仅 `includeOriginal=true` 时返回；无法保留时为 null（如首次 fix 时本地文件已过期且源图不可用）。 |
-| `correctionStatus` | string | `"pending"` / `"corrected"` / `"reviewed"`。 |
-| `correctionCount` | int | fix 提交次数。 |
-| `correctedAt` | string \| null | 最近一次 fix 的时间戳（ISO 8601）。 |
-| `detectionDiff` | int | 最新 fix 相对原始结果的 detection 数量变化（有符号，`-2` 表示移除了 2 个）。每次 fix 重新计算（latest-wins）。 |
-| `skuMismatchCount` | int | 最新 fix 与原始结果之间 `skuId` 不同的 detection 数量（即 reassign 的数量）。 |
-| `inputImageUrl` | string \| null | 未标注的输入原图（完整绝对 URL；上传失败时为基于请求 host 展开的本地 `/results/inputs/...` URL）。 |
-| `userCorrection` | array \| null | 最近一次通过 `/recognition/fix` 提交的 correction（含 `remove` 记录，被移除的 detection 可追溯）。 |
-| `visualImageUrl` | string \| null | 最终 annotated image URL（**始终为绝对 URL** —— 已上传时为 CDN URL，否则为 `http://<host>:<port>/results/annotated/...`）。 |
+**错误：** 400 时间格式无效或 correctionStatus 非法。
 
-**Error response：** 404 — `taskId` 不存在。
+### POST /api/v1/logs/recognition/status
 
----
+手动设置纠错状态，例如标记 reviewed 或重置 pending。只改 workflow 状态，不影响 finalResult / correctionCount。
 
-### GET `/api/v1/logs/recognition/list`
+**Request：** {"taskId": "...", "correctionStatus": "reviewed"} → data 为 {}。**错误：** 404 taskId 不存在。
 
-分页查询 recognition log，支持按时间范围和 correction status 过滤。按 `createdAt` 降序排列。
+### POST /api/v1/logs/recognition/delete
 
-**Query parameter：**
+批量删除 log 及本地文件（annotated / inputs / pre-fix snapshot，best-effort）。CDN 对象暂为 orphan（未配置 Qiniu 删除凭证）。
 
-| Param | Type | Default | 说明 |
-|-------|------|---------|------|
-| `page` | int | 1 | 页码（从 1 开始）。 |
-| `size` | int | 20 | 每页条数。 |
-| `startTime` | string | — | ISO 8601；过滤 `createdAt >= startTime`。带时区的时间会转换为服务器本地时间。 |
-| `endTime` | string | — | ISO 8601；过滤 `createdAt <= endTime`。 |
-| `correctionStatus` | string | — | `"pending"` / `"corrected"` / `"reviewed"`。 |
+**Request：** {"taskIds": ["...", "..."]}（1–100 条）
 
-**Response `data`：**
+**Response：** data = {"deleted": 2, "notFound": ["gone_id"]}
 
-| Field | Type | 说明 |
-|-------|------|------|
-| `list` | array | Log 列表（见下文）。 |
-| `page` / `pageSize` / `total` | int | 分页信息。 |
+## 7. System
 
-**每条 log item：**
+### GET /api/v1/system/train-status/get
 
-| Field | Type | 说明 |
-|-------|------|------|
-| `taskId` | string | |
-| `createdAt` | string \| null | ISO 8601。 |
-| `correctionStatus` | string | `"pending"` / `"corrected"` / `"reviewed"`。 |
-| `correctedAt` | string \| null | 最近一次 fix 的时间戳。 |
-| `correctionCount` | int | fix 提交次数。 |
-| `detectionCount` | int | 原始结果中的 detection 数量（迁移前 / 失败的 log 为 0）。 |
-| `detectionDiff` | int | 最新 fix 相对原始结果的 detection 数量变化（有符号）。 |
-| `skuMismatchCount` | int | 最新 fix 中被 reassign 的 detection 数量。 |
-| `inputImageUrl` | string \| null | 未标注的输入原图 URL（绝对 URL）。 |
-| `visualImageUrl` | string \| null | 最终 annotated image URL（绝对 URL）。 |
+**Query parameter：** trainJobId（必填）
 
-**Error response：**
+**Response data：**
 
-| HTTP | 触发条件 |
-|------|----------|
-| 400 | `startTime`/`endTime` 格式无效，或 `correctionStatus` 取值非法 |
+| Field           | Type           | 说明                                    |
+|---------------|--------------|---------------------------------------|
+| status          | string         | pending → indexing → completed / failed |
+| progress        | int            | 0–100                                   |
+| estimatedTime   | string \| null | 保留字段，当前恒为 null                 |
+| failedCount     | int            | Embedding 失败图片数                    |
+| totalCount      | int            | 图片总数                                |
+| embeddingFailed | array \| null  | 失败的 media URL 列表（仅在失败时出现） |
 
----
-
-### POST `/api/v1/logs/recognition/status`
-
-手动修改 log 的 correction status —— 例如标记为 `"reviewed"`（已检查、无需修改）或重置为 `"pending"` 重新打开。只改 workflow 状态：`correctionCount`、`correctedAt` 和 `finalResult` 跟随实际 fix 提交，不受影响。
-
-**Request：**
-
-| Field | Type | Required | 说明 |
-|-------|------|----------|------|
-| `taskId` | string | yes | |
-| `correctionStatus` | `"pending"` \| `"corrected"` \| `"reviewed"` | yes | |
-
-**Response：** `data` 为空 `{}`。
-
-**Error response：** 404 — `taskId` 不存在。
-
----
-
-### POST `/api/v1/logs/recognition/delete`
-
-批量删除 recognition log。删除数据库记录和本地文件（annotated、inputs、pre-fix 快照 —— best-effort）。CDN 对象目前会成为 orphan（尚未配置七牛删除凭证）；凭证可用后会补充删除逻辑。
-
-**Request：**
-
-| Field | Type | Required | 说明 |
-|-------|------|----------|------|
-| `taskIds` | string[]（1–100） | yes | 要删除的 taskId 列表。 |
-
-**Response：** `data = {"deleted": <int>, "notFound": ["taskId", ...]}`
-
-```json
-{"code": 1, "data": {"deleted": 2, "notFound": ["gone_id"]}, "msg": "success"}
-```
-
----
-
-## 8. System
-
-### GET `/api/v1/system/train-status/get`
-
-查询 async embedding 任务的状态。
-
-**Query parameter：** `trainJobId`（string，必填）
-
-**Response `data`：**
-
-| Field | Type | 说明 |
-|-------|------|------|
-| `status` | string | 任务 lifecycle：`"pending"` → `"indexing"` → `"completed"`（异常时为 `"failed"`）。 |
-| `progress` | int | 进度百分比（0–100）。 |
-| `estimatedTime` | string \| null | 保留 field；当前始终为 `null`。 |
-| `failedCount` | int | Embedding 失败的图片数量。 |
-| `totalCount` | int | 任务中的图片总数。 |
-| `embeddingFailed` | array \| null | 仅在有图片失败时出现：失败的 media URL 列表。 |
-
-**示例：**
-
-```json
-{
-  "code": 1,
-  "data": {
-    "status": "completed",
-    "progress": 100,
-    "estimatedTime": null,
-    "failedCount": 0,
-    "totalCount": 5
-  },
-  "msg": "success"
-}
-```
-
-**Error response：** 404 — `trainJobId` 不存在。
+**错误：** 404 trainJobId 不存在。

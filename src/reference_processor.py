@@ -164,18 +164,31 @@ class ReferenceProcessor:
         media_id: str,
         image_path: Path,
         metadata: dict | None = None,
+        pre_cropped: bool = False,
     ) -> ProcessResult:
         """Full pipeline: crop → embed → add to index → save crop to temp file.
 
         Returns ProcessResult with success flag and optional crop_path.
         crop_path is a temp file that the caller should upload and then delete.
+
+        pre_cropped=True skips YOLOE cropping/masking entirely — the image is
+        used as-is (EXIF-transposed) as the reference. No detection-failure
+        path exists in that mode; only corrupt/unreadable images fail.
         """
-        crop = self.crop_reference(image_path)
+        if pre_cropped:
+            image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
+            crop = image
+        else:
+            crop = self.crop_reference(image_path)
 
         if crop is None:
             logger.warning(
                 "No center-covering detection for %s/%s — skipping", sku_id, media_id
             )
+            return ProcessResult(success=False)
+
+        if crop.size[0] == 0 or crop.size[1] == 0:
+            logger.warning("Empty crop from: %s", image_path)
             return ProcessResult(success=False)
 
         # Extract features (CLS + patches) in a single forward pass
