@@ -126,6 +126,9 @@ class SKUMediaRequest(BaseModel):
     skuId: str = Field(max_length=128)
     action: Literal["add", "delete"]
     media: list[MediaItem]
+    # Optional panel-supplied job id (add action only). Absent → the server
+    # generates one; supplied ids are deduplicated (409 on collision).
+    trainJobId: str | None = Field(default=None, max_length=128)
 
 
 class SkuDistributionEntry(BaseModel):

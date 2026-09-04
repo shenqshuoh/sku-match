@@ -30,8 +30,6 @@ curl -H "X-API-Key: <key>" http://localhost:8000/api/v1/goods/sku/list
 | 500  | 内部错误            | Unexpected exception                       |
 | 503  | service unavailable | No SKUs indexed yet — add references first |
 
-> 例外：/goods/sku/media 部分图片失败返回 HTTP 200 + code=0，data.embeddingFailed 列出失败 URL（其余可能已成功），需人工处理。
-
 ## 3. Endpoint 一览
 
 | Method | Path                            | 说明                                                 |
@@ -240,21 +238,26 @@ remove 移除该检测目标（可经 userCorrection 追溯）；reassign 替换
 
 **Request：**
 
-| Field  | Type              | Required | 说明            |
-|------|-----------------|--------|---------------|
-| skuId  | string            | yes      |                 |
-| action | "add" \| "delete" | yes      |                 |
-| media  | array             | yes      | Media item 列表 |
+| Field        | Type              | Required | 说明                                                                                                     |
+|------------|-----------------|--------|--------------------------------------------------------------------------------------------------------|
+| skuId        | string            | yes      |                                                                                                          |
+| action       | "add" \| "delete" | yes      |                                                                                                          |
+| media        | array             | yes      | Media item 列表                                                                                          |
+| trainJobId   | string            | no       | 仅 add：panel 提供的 job id，用于轮询；与已有 job 重复返回 409；缺省时 server 生成 job_{skuId}_{unix_ts} |
 
-**Media item：** add 需 mediaUrl（要 embed 的图片），delete 需 mediaId；另有可选字段 preCropped（默认 false）：
+**Media item：** add 需 mediaUrl（要 embed 的图片），delete 需 mediaId；add 时携带 mediaId 的 item 会被跳过；另有可选字段 preCropped（默认 false）：
 
 | Field      | Type | 说明                                                                                                                                            |
 |----------|----|-----------------------------------------------------------------------------------------------------------------------------------------------|
 | preCropped | bool | 默认 false：server 执行 YOLOE crop + 背景遮罩。true：图片已是裁好的 reference，原样使用（仅 EXIF 校正），跳过检测环节，不会因“未检测到目标”失败 |
 
-**行为：** add 依次执行 download → YOLOE crop → embedding → 写入 Chroma → 上传 Qiniu（preCropped: true 跳过 crop / mask 环节）；delete 清理 media 行、vector、patch / color 文件。
+**行为（add 为异步）：** 先写入 media 行，随后在后台 job 中 embedding（与 /goods/sku/new 相同管线：download → crop（preCropped: true 跳过）→ embedding → 写入 Chroma → patch / color 缓存 → 上传 Qiniu）。请求立即返回 trainJobId —— 通过 GET /api/v1/system/train-status/get 轮询进度，失败的图片在轮询结果的 embeddingFailed 中列出，并在 SKU media 列表中标记 failed；job 结束时基于该 SKU 全部 media 重算 trainStatus。若所有 item 均携带 mediaId（无可 embed 项），不创建 job，data 为 {}。
 
-**Response：** data 为 {}。**错误：** 400 参数缺失或 action 非法；404 skuId 不存在；部分图片 embedding 失败返回 200 + code=0，data.embeddingFailed 列出失败 URL。
+**行为（delete）：** 清理 media 行、vector、patch / color 文件，随后重算该 SKU 的 trainStatus（删除最后一张失败图片时 failed → completed；全部删空后为 pending）。
+
+**Response：** add 返回 data = {"trainJobId": "...", "mediaIds": ["...", ...]}（mediaIds 与请求顺序一致）；delete 为 {}。
+
+**错误：** 400 参数缺失或 action 非法；404 skuId 不存在；409 提供的 trainJobId 已存在。
 
 ## 6. Log
 
@@ -320,13 +323,13 @@ remove 移除该检测目标（可经 userCorrection 追溯）；reassign 替换
 
 **Response data：**
 
-| Field           | Type           | 说明                                    |
-|---------------|--------------|---------------------------------------|
-| status          | string         | pending → indexing → completed / failed |
-| progress        | int            | 0–100                                   |
-| estimatedTime   | string \| null | 保留字段，当前恒为 null                 |
-| failedCount     | int            | Embedding 失败图片数                    |
-| totalCount      | int            | 图片总数                                |
-| embeddingFailed | array \| null  | 失败的 media URL 列表（仅在失败时出现） |
+| Field           | Type           | 说明                                                                                          |
+|---------------|--------------|---------------------------------------------------------------------------------------------|
+| status          | string         | pending → indexing → completed / failed                                                       |
+| progress        | int            | 0–100                                                                                         |
+| estimatedTime   | string \| null | 保留字段，当前恒为 null                                                                       |
+| failedCount     | int            | Embedding 失败图片数                                                                          |
+| totalCount      | int            | 图片总数                                                                                      |
+| embeddingFailed | array \| null  | 失败的 media URL 列表（仅在失败时出现；/goods/sku/new 与 /goods/sku/media add 的 job 均适用） |
 
 **错误：** 404 trainJobId 不存在。

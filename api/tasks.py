@@ -58,6 +58,21 @@ async def process_single_media(
             image_storage.cleanup_download(local_path)
 
 
+async def recompute_train_status(sku_id: str) -> str:
+    """Recompute a SKU's train_status from its media rows (whole-SKU view).
+
+    Any failed media → "failed"; zero media → "pending"; else "completed".
+    Callers: embed-job completion, media delete. Returns the new status.
+    """
+    async with async_session() as session:
+        result = await session.execute(select(SKUMedia.failed).where(SKUMedia.sku_id == sku_id))
+        flags = [row[0] for row in result.all()]
+        status = "failed" if any(flags) else ("pending" if not flags else "completed")
+        await session.execute(update(SKU).where(SKU.sku_id == sku_id).values(train_status=status))
+        await session.commit()
+    return status
+
+
 async def start_embed_task(
     train_job_id: str,
     sku_id: str,
@@ -67,6 +82,7 @@ async def start_embed_task(
     image_storage,
     sku_name: str,
     inference_executor,
+    pre_cropped_flags: list[bool] | None = None,
 ) -> None:
     async def _run():
         try:
@@ -86,9 +102,15 @@ async def start_embed_task(
             failed_media_ids: list[str] = []
 
             for idx, (url, media_id) in enumerate(zip(media_urls, media_ids), start=1):
+                pre_cropped = (
+                    pre_cropped_flags[idx - 1]
+                    if pre_cropped_flags and idx - 1 < len(pre_cropped_flags)
+                    else False
+                )
                 success = await process_single_media(
                     sku_id, sku_name, media_id, url,
                     processor, image_storage, inference_executor,
+                    pre_cropped=pre_cropped,
                 )
                 if not success:
                     embedding_failed.append(url)
@@ -106,13 +128,11 @@ async def start_embed_task(
             failed_json = json.dumps(embedding_failed) if embedding_failed else None
 
             if embedding_failed:
-                sku_status = "failed"
                 logger.warning(
                     "Indexing task completed with %d/%d failed images: train_job_id=%s",
                     len(embedding_failed), len(media_urls), train_job_id,
                 )
             else:
-                sku_status = "completed"
                 logger.info("Indexing task completed: train_job_id=%s", train_job_id)
 
             async with async_session() as session:
@@ -127,9 +147,6 @@ async def start_embed_task(
                         total_count=len(media_urls),
                     )
                 )
-                await session.execute(
-                    update(SKU).where(SKU.sku_id == sku_id).values(train_status=sku_status)
-                )
                 # Flag failed media rows so the SKU list shows exactly which
                 # reference images need manual intervention
                 if failed_media_ids:
@@ -139,6 +156,10 @@ async def start_embed_task(
                         .values(failed=True)
                     )
                 await session.commit()
+
+            # Whole-SKU status: reflects ALL media (including older failures),
+            # not just this job's batch
+            await recompute_train_status(sku_id)
 
         except Exception:
             logger.exception("Indexing task failed: train_job_id=%s", train_job_id)

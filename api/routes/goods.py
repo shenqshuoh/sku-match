@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
@@ -34,7 +35,7 @@ from api.schemas import (
     SKUUpdateRequest,
 )
 from api.services.image_storage import ImageStorage
-from api.tasks import process_single_media, start_embed_task
+from api.tasks import recompute_train_status, start_embed_task
 from src.color_store import ColorStore
 from src.indexer import SKUIndexer
 from src.patch_store import PatchStore
@@ -298,38 +299,53 @@ async def manage_media(
         if err:
             return err
         sku_name = sku.sku_name
-        embedding_failed: list[str] = []
 
-        for item in request.media:
-            if item.mediaId:
-                continue
-            if not item.mediaUrl:
-                continue
-            media_id = uuid.uuid4().hex
-            success = await process_single_media(
-                request.skuId, sku_name, media_id, item.mediaUrl,
-                processor, image_storage, inference_executor,
-                pre_cropped=item.preCropped,
+        # Resolve trainJobId: panel-supplied (dedupe 409) or server-generated
+        train_job_id = (request.trainJobId or "").strip() or None
+        if train_job_id:
+            existing_job = await db.scalar(
+                select(TrainJob).where(TrainJob.train_job_id == train_job_id)
             )
-            if success:
-                media = SKUMedia(
+            if existing_job is not None:
+                return error_response(
+                    f"trainJobId '{train_job_id}' already exists", status_code=409
+                )
+
+        # Items carrying a mediaId are skipped (no re-embed of existing media)
+        embeddable = [item for item in request.media if not item.mediaId]
+        if not embeddable:
+            return ApiResponse(data={})
+
+        # Insert media rows upfront (failed=False); embedding runs async
+        media_ids = [uuid.uuid4().hex for _ in embeddable]
+        for item, media_id in zip(embeddable, media_ids):
+            db.add(
+                SKUMedia(
                     media_id=media_id, sku_id=request.skuId,
                     media_url=item.mediaUrl, media_type="IMAGE",
                 )
-            else:
-                # Keep the failed image visible in the media list (flagged) so the
-                # operator can see exactly which reference didn't produce a crop
-                media = SKUMedia(
-                    media_id=media_id, sku_id=request.skuId,
-                    media_url=item.mediaUrl, media_type="IMAGE", failed=True,
-                )
-                embedding_failed.append(item.mediaUrl or "")
-            db.add(media)
-            await db.commit()
-        if embedding_failed:
-            return ApiResponse(code=0, msg="Some images failed to embed", data={"embeddingFailed": embedding_failed})
-        return ApiResponse(data={})
+            )
+        if train_job_id is None:
+            train_job_id = f"job_{request.skuId}_{int(time.time())}"
+        db.add(TrainJob(train_job_id=train_job_id, sku_id=request.skuId, status="pending"))
+        await db.commit()
+
+        await start_embed_task(
+            train_job_id=train_job_id,
+            sku_id=request.skuId,
+            media_urls=[item.mediaUrl or "" for item in embeddable],
+            media_ids=media_ids,
+            processor=processor,
+            image_storage=image_storage,
+            sku_name=sku_name,
+            inference_executor=inference_executor,
+            pre_cropped_flags=[bool(item.preCropped) for item in embeddable],
+        )
+        # Partial failures are reported via /system/train-status/get polling,
+        # not in this response (failed media rows are flagged in the SKU list)
+        return ApiResponse(data={"trainJobId": train_job_id, "mediaIds": media_ids})
     elif request.action == "delete":
+        deleted = False
         for item in request.media:
             if not item.mediaId:
                 continue
@@ -341,6 +357,11 @@ async def manage_media(
                 await asyncio.to_thread(patch_store.delete, doc_id)
             if color_store is not None:
                 await asyncio.to_thread(color_store.delete, doc_id)
+            deleted = True
+        if deleted:
+            # Deleting the last failed image flips a failed SKU back to
+            # completed; deleting everything leaves it pending
+            await recompute_train_status(request.skuId)
         return ApiResponse(data={})
     else:
         return error_response(f"Unsupported action: '{request.action}'", status_code=400)

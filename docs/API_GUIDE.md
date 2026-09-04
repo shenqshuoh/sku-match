@@ -60,9 +60,6 @@ The HTTP status code indicates the error type:
 | 500 | Internal server error | Unexpected exception |
 | 503 | Service unavailable | No SKUs indexed yet |
 
-> One exception: partial failure in `/goods/sku/media` returns HTTP 200 with `code=0` and
-> `data.embeddingFailed` listing the URLs that failed (some images may have succeeded).
-
 All response field names use **camelCase** (e.g. `matchedImage`, `skuId`, `classId`).
 
 ## 3. Quick Start
@@ -398,20 +395,21 @@ Add or delete media for an existing SKU.
 | `skuId` | string | yes | |
 | `action` | `"add"` \| `"delete"` | yes | |
 | `media` | array | yes | List of media items (see below). |
+| `trainJobId` | string \| null | no | Add action only. Panel-supplied job id for polling; collides with an existing job → 409. Absent → server generates `job_{skuId}_{unix_ts}`. |
 
 **Media item:**
 
 | Field | Type | Required (add) | Required (delete) | Notes |
 |-------|------|----------------|-------------------|-------|
-| `mediaId` | string \| null | no | yes | Which media to delete. |
+| `mediaId` | string \| null | no | yes | Which media to delete. Items carrying a `mediaId` in an add request are skipped. |
 | `mediaUrl` | string \| null | yes | no | Image URL/path to embed (add action). |
 | `preCropped` | bool | no | — | Default `false`: server runs YOLOE crop + background masking. `true`: image is already a cropped reference — used as-is (EXIF-transposed), no detection step, so it cannot fail on "no detection". |
 
-**Add behavior:** Each image is downloaded, cropped via YOLOE (`preCropped: true` skips crop/mask and uses the image as-is), embedded, indexed in Chroma, and the processed crop is uploaded to Qiniu. The media row is inserted on success.
+**Add behavior (async):** Media rows are inserted immediately and embedding runs in a background job (same pipeline as `/goods/sku/new`: download → crop unless `preCropped` → embed → Chroma index → patch/color caching → Qiniu crop upload). The response returns right away with a `trainJobId` — poll `GET /api/v1/system/train-status/get` for progress; images that fail to embed are listed there (`embeddingFailed`) and flagged as `failed` in the SKU media list. The SKU's `trainStatus` is recomputed from all its media when the job ends. If no item is embeddable (all carry a `mediaId`), no job is created and `data` is `{}`.
 
-**Delete behavior:** Removes the DB media row, Chroma vector, patch file, and color descriptor file for each `mediaId`.
+**Delete behavior:** Removes the DB media row, Chroma vector, patch file, and color descriptor file for each `mediaId`, then recomputes the SKU's `trainStatus` (deleting the last failed image flips `failed` → `completed`; deleting all media leaves `pending`).
 
-**Response:** `data` is an empty object `{}` on success.
+**Response (add):** `data = {"trainJobId": "...", "mediaIds": ["...", ...]}` — the assigned media ids in request order. Delete: `data = {}`.
 
 **Error responses:**
 
@@ -419,7 +417,7 @@ Add or delete media for an existing SKU.
 |------|-----------|
 | 400 | Missing `mediaUrl` (add), or unsupported `action` |
 | 404 | Unknown `skuId` (add) |
-| 200 + `code=0` | Some images failed to embed — `data.embeddingFailed` lists failed URLs |
+| 409 | Supplied `trainJobId` already exists |
 
 ---
 
@@ -554,7 +552,7 @@ Check the status of an asynchronous embedding job.
 | `estimatedTime` | string \| null | Reserved; always `null` currently. |
 | `failedCount` | int | Number of images that failed to embed. |
 | `totalCount` | int | Total number of images in the job. |
-| `embeddingFailed` | array \| null | Present only when some images failed: list of failed media URLs. |
+| `embeddingFailed` | array \| null | Present only when some images failed: list of failed media URLs. Applies to jobs from both `/goods/sku/new` and `/goods/sku/media` (add). |
 
 **Example:**
 
