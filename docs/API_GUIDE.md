@@ -224,7 +224,14 @@ Detect beverage containers in an image and match each against the indexed SKU ca
 
 Submit human corrections for a previous detection. Corrections are applied to a **corrected copy** of the result (`finalResult`); the original AI output (`aiResult`) is immutable and preserved for fine-tuning. It does not re-run detection.
 
-Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `correctionCount`, and stamps `correctedAt`. Fixes are **incremental**: each submission is applied on top of the current `finalResult` — previous fixes are kept. `userCorrection` accumulates every submitted fix item in order (full audit trail).
+Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `correctionCount`, and stamps `correctedAt`. Fixes are **incremental**: each submission is applied on top of the current `finalResult` — previous fixes are kept. `userCorrection` accumulates every submitted fix item in order (full audit trail), each entry enriched with server-resolved values from the view at fix time:
+
+- `reassign` → `{fixType, itemId, roiRect, skuId, skuIdOld}` — `roiRect` is the item's bbox at fix time; `skuIdOld` is the skuId in the view right **before this fix** (the operator's vantage — may itself be an earlier fix's result).
+- `remove` → `{fixType, itemId, roiRect, skuId}` — the removed item's bbox and skuId as seen at removal time.
+- `adjust-roi` → `{fixType, itemId, roiRect, roiRectOld, skuId}` — new box, pre-fix box, and the item's (unchanged) skuId.
+- `add` → `{fixType, itemId, roiRect, skuId}` — `itemId` is the **server-assigned** id (the request carries none for `add`).
+
+Add ids are **monotonic and never reused**: the next add id is one past the highest of the original ids, the current view, and every id ever logged for an add — an added item that was later removed still consumes its id (it stays recorded in `userCorrection`), and the next add skips past it.
 
 **Request:**
 
@@ -247,7 +254,7 @@ Submitting a fix sets the log's `correctionStatus` to `corrected`, increments `c
 - `remove` — drops the detection from `finalResult` (reduces counts). The removed item remains traceable via `userCorrection` and is still present in `originalResult`.
 - `reassign` — replaces `skuId`/`skuName` in `finalResult`; counts are recomputed.
 - `adjust-roi` — replaces `bbox` in `finalResult`.
-- `add` — creates a **new, manually added detection** (model miss): gets the next free `itemId`, uses `roiRect` as its `bbox`, resolves `skuName` from the index. Model-output fields are `null` (`detectionConf`, `classId`, `className`, `matchScore`, `skuDistribution`, `matchedVectorTags`) and the entry carries `"source": "manual"` (model entries carry `"source": "model"`) — clients should null-check these fields; fine-tuning pipelines can filter on `source`.
+- `add` — creates a **new, manually added detection** (model miss): gets the next free `itemId` (monotonic, never reused — see `userCorrection` enrichment above), uses `roiRect` as its `bbox`, resolves `skuName` from the index. Model-output fields are `null` (`detectionConf`, `classId`, `className`, `matchScore`, `skuDistribution`, `matchedVectorTags`) and the entry carries `"source": "manual"` (model entries carry `"source": "model"`) — clients should null-check these fields; fine-tuning pipelines can filter on `source`.
 - `counts` in `finalResult` is always recomputed from the remaining detections.
 
 ```json
@@ -448,7 +455,7 @@ Retrieve the AI result (corrected view if available), correction state, and huma
 | `detectionsRemoved` | int | Original detections no longer present in the current result. |
 | `skuMismatchCount` | int | Detections reassigned by the latest fix (vs original). |
 | `inputImageUrl` | string \| null | Unannotated input image URL (absolute). |
-| `userCorrection` | array \| null | All correction items submitted via `/recognition/fix`, accumulated in submission order — including `remove` entries, so removed detections stay traceable. |
+| `userCorrection` | array \| null | All correction items submitted via `/recognition/fix`, accumulated in submission order (operation log). Each entry is enriched with server-resolved values: `roiRect` + `skuId` on every type, plus `skuIdOld` (reassign, pre-fix value) / `roiRectOld` (adjust-roi) / the server-assigned `itemId` (add). |
 | `visualImageUrl` | string \| null | Final annotated image URL. **Always absolute** — CDN URL when uploaded, otherwise `http://<host>:<port>/results/annotated/...` derived from the request's base URL. |
 
 **Error responses:** 404 — unknown `taskId`.

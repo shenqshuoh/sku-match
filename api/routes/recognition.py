@@ -310,6 +310,15 @@ async def fix(
         if final is None:
             final = json.loads(log.ai_result_json)  # fresh copy — original stays immutable
 
+        # 2c. Load the accumulated correction log early — logged add itemIds are
+        #     part of the consumed-id high-water mark for new add ids
+        try:
+            corrections = json.loads(log.user_correction_json) if log.user_correction_json else []
+        except json.JSONDecodeError:
+            corrections = []
+        if not isinstance(corrections, list):
+            corrections = []
+
         # 3. Validate itemIds against the current result (items removed by an
         #    earlier fix can no longer be referenced). fixType "add" creates a
         #    new entry and carries no itemId.
@@ -324,7 +333,27 @@ async def fix(
 
         # 4. Apply fixes on top of the current result (incremental — earlier fixes
         #    remain in effect). ai_result_json stays immutable.
-        next_item_id = max((d.get("itemId") or 0) for d in final_dets)
+        #    Add ids are monotonic and never reused: high-water mark over the
+        #    original ids, the current view, and every id ever logged for an add
+        #    (an added item that was later removed still consumes its id — the
+        #    correction log is the durable record of consumed ids).
+        def _logged_add_ids() -> set:
+            ids = set()
+            for e in corrections:
+                if isinstance(e, dict) and e.get("fixType") == "add":
+                    iid = e.get("itemId")
+                    if isinstance(iid, int):
+                        ids.add(iid)
+            return ids
+
+        next_item_id = max(
+            (d.get("itemId") or 0)
+            for d in detections + final_dets
+        ) if (detections or final_dets) else 0
+        logged = _logged_add_ids()
+        if logged:
+            next_item_id = max(next_item_id, max(logged))
+        enriched_entries = []
         for fi in request.fixItems:
             if fi.fixType == "add":
                 # Manually added entry: model-output fields don't exist — nulls +
@@ -346,6 +375,13 @@ async def fix(
                     "matchedVectorTags": None,
                     "source": "manual",
                 })
+                # Log the server-assigned itemId (request carries none for add)
+                enriched_entries.append({
+                    "fixType": "add",
+                    "itemId": next_item_id,
+                    "roiRect": list(fi.roiRect or []),
+                    "skuId": new_sku_id,
+                })
                 continue
             det = next((d for d in final_dets if d.get("itemId") == fi.itemId), None)
             if det is None:
@@ -354,15 +390,38 @@ async def fix(
                     status_code=400,
                 )
             if fi.fixType == "remove":
+                # Snapshot the removed item's box and sku as seen at removal time
+                enriched_entries.append({
+                    "fixType": "remove",
+                    "itemId": fi.itemId,
+                    "roiRect": list(det.get("bbox") or []),
+                    "skuId": det.get("skuId", ""),
+                })
                 final_dets.remove(det)
             elif fi.fixType == "reassign":
                 # No validation against the live SKU table: corrections may reference
                 # deleted SKUs (historical data). Fallback to the raw id when unknown.
                 new_sku_id = fi.skuId or ""
                 sku_name = await asyncio.to_thread(indexer.get_sku_name, new_sku_id) or new_sku_id
+                # skuIdOld = value in the view right before this fix (operator's
+                # vantage — may itself be an earlier fix's result)
+                enriched_entries.append({
+                    "fixType": "reassign",
+                    "itemId": fi.itemId,
+                    "roiRect": list(det.get("bbox") or []),
+                    "skuId": new_sku_id,
+                    "skuIdOld": det.get("skuId", ""),
+                })
                 det["skuId"] = new_sku_id
                 det["skuName"] = sku_name
             elif fi.fixType == "adjust-roi":
+                enriched_entries.append({
+                    "fixType": "adjust-roi",
+                    "itemId": fi.itemId,
+                    "roiRect": list(fi.roiRect or []),
+                    "roiRectOld": list(det.get("bbox") or []),
+                    "skuId": det.get("skuId", ""),
+                })
                 det["bbox"] = list(fi.roiRect or [])
 
         # 5. Recompute counts from the remaining detections
@@ -391,14 +450,9 @@ async def fix(
         )
 
         # 6. Persist — fixes accumulate: userCorrection keeps every submitted item
-        #    in submission order (full audit trail across fixes)
-        try:
-            corrections = json.loads(log.user_correction_json) if log.user_correction_json else []
-        except json.JSONDecodeError:
-            corrections = []
-        if not isinstance(corrections, list):
-            corrections = []
-        corrections.extend(fi.model_dump() for fi in request.fixItems)
+        #    in submission order (full audit trail across fixes), each entry
+        #    enriched with server-resolved values from the view at fix time
+        corrections.extend(enriched_entries)
         log.user_correction_json = json.dumps(corrections)
         log.final_result_json = json.dumps(final)
         log.correction_status = "corrected"

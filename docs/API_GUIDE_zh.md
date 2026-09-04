@@ -136,6 +136,8 @@ curl -H "X-API-Key: <key>" http://localhost:8000/api/v1/goods/sku/list
 
 对识别结果人工纠错，不重新执行识别。纠错应用在修正副本 finalResult 上；原始输出 originalResult 不可变（fine-tuning 数据）。fix 为**增量累积**：每次提交应用在当前 finalResult 上，之前的纠错保留；userCorrection 按提交顺序累积全部纠错记录。提交成功后 correctionStatus 为 corrected，correctionCount 加一。
 
+userCorrection 为操作日志，每条记录由服务端按纠错发生时的视图补全明细：reassign 记录 itemId、roiRect（纠错时的 bbox）、skuId（新值）与 skuIdOld（该次 fix 前视图中的 skuId，即操作者当时看到的值）；remove 记录被移除检测目标当时的 roiRect 与 skuId；adjust-roi 记录 roiRect（新值）、roiRectOld（fix 前 bbox）与该目标的 skuId；add 记录服务端分配的 itemId（请求不携带）、roiRect 与 skuId。add 的 itemId 单调递增且不复用：下一个 add id 取原始结果、当前视图与历史 add 记录中出现过的最大 itemId 加一 —— 已添加后又被移除的目标仍占用其 id（记录保留在 userCorrection 中），后续 add 跳过该 id。
+
 **Request：**
 
 | Field    | Type           | Required | 说明             |
@@ -152,7 +154,7 @@ curl -H "X-API-Key: <key>" http://localhost:8000/api/v1/goods/sku/list
 | roiRect | number[4] \| null                               | adjust-roi / add 必填 | 修正后的 bbox；add 时为手动框选的新检测目标 bbox                                     |
 | skuId   | string \| null                                  | reassign / add 必填   | 修正后的 skuId（允许引用已删除的 SKU）；add 时为新检测目标指定的 SKU                 |
 
-remove 移除该检测目标（可经 userCorrection 追溯）；reassign 替换 skuId/skuName；adjust-roi 替换 bbox；add 新增人工检测目标（补漏）：分配下一个空闲 itemId，模型输出字段（detectionConf / classId / className / matchScore / skuDistribution / matchedVectorTags）均为 null，并携带 source: "manual" 标记（模型条目为 source: "model"）—— 客户端需对这些字段做 null 判断，fine-tuning 可按 source 过滤。
+remove 移除该检测目标（可经 userCorrection 追溯）；reassign 替换 skuId/skuName；adjust-roi 替换 bbox；add 新增人工检测目标（补漏）：分配下一个空闲 itemId（单调递增、不复用，见上文 userCorrection 明细），模型输出字段（detectionConf / classId / className / matchScore / skuDistribution / matchedVectorTags）均为 null，并携带 source: "manual" 标记（模型条目为 source: "model"）—— 客户端需对这些字段做 null 判断，fine-tuning 可按 source 过滤。
 
 ```json
 {
@@ -267,20 +269,20 @@ remove 移除该检测目标（可经 userCorrection 追溯）；reassign 替换
 
 **Response data：**
 
-| Field             | Type           | 说明                                                                  |
-|-----------------|--------------|---------------------------------------------------------------------|
-| aiResult          | object \| null | **有效结果**：有 fix 时为 finalResult（修正视图），否则为原始 AI 输出 |
-| originalResult    | object \| null | 不可变原始输出，仅 includeOriginal=true 时返回                        |
-| originalImageUrl  | string \| null | Pre-fix annotated image URL，仅 includeOriginal=true 时返回           |
-| correctionStatus  | string         | pending / corrected / reviewed                                        |
-| correctionCount   | int            | fix 提交次数                                                          |
-| correctedAt       | string \| null | 最近一次 fix 时间（ISO 8601）                                         |
-| detectionsAdded   | int            | 当前结果相对原始结果新增的检测目标数量（fix 手工添加且仍存在）        |
-| detectionsRemoved | int            | 原始结果中已被移除、不再存在于当前结果的检测目标数量                  |
-| skuMismatchCount  | int            | 最新 fix 中被 reassign 的数量                                         |
-| inputImageUrl     | string \| null | 未标注输入原图 URL（绝对 URL）                                        |
-| userCorrection    | array \| null  | 历次提交的 fixItems 按顺序累积（含 remove 记录，完整审计）            |
-| visualImageUrl    | string \| null | 最终 annotated image URL（始终为绝对 URL，本地 fallback 时含 host）   |
+| Field             | Type           | 说明                                                                                                                                                                                               |
+|-----------------|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| aiResult          | object \| null | **有效结果**：有 fix 时为 finalResult（修正视图），否则为原始 AI 输出                                                                                                                              |
+| originalResult    | object \| null | 不可变原始输出，仅 includeOriginal=true 时返回                                                                                                                                                     |
+| originalImageUrl  | string \| null | Pre-fix annotated image URL，仅 includeOriginal=true 时返回                                                                                                                                        |
+| correctionStatus  | string         | pending / corrected / reviewed                                                                                                                                                                     |
+| correctionCount   | int            | fix 提交次数                                                                                                                                                                                       |
+| correctedAt       | string \| null | 最近一次 fix 时间（ISO 8601）                                                                                                                                                                      |
+| detectionsAdded   | int            | 当前结果相对原始结果新增的检测目标数量（fix 手工添加且仍存在）                                                                                                                                     |
+| detectionsRemoved | int            | 原始结果中已被移除、不再存在于当前结果的检测目标数量                                                                                                                                               |
+| skuMismatchCount  | int            | 最新 fix 中被 reassign 的数量                                                                                                                                                                      |
+| inputImageUrl     | string \| null | 未标注输入原图 URL（绝对 URL）                                                                                                                                                                     |
+| userCorrection    | array \| null  | 历次提交的 fixItems 按顺序累积（操作日志）。每条记录含服务端补全的明细：全部类型记录 roiRect 与 skuId，reassign 另有 skuIdOld（fix 前值），adjust-roi 另有 roiRectOld，add 记录服务端分配的 itemId |
+| visualImageUrl    | string \| null | 最终 annotated image URL（始终为绝对 URL，本地 fallback 时含 host）                                                                                                                                |
 
 **错误：** 404 taskId 不存在。
 
